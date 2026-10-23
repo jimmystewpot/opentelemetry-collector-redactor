@@ -55,7 +55,7 @@ bench:
 
 print-env:
 	@echo 'export CGO_CFLAGS="-I$(ORT_DIR)/include"'
-	@echo 'export CGO_LDFLAGS="-L$(ORT_DIR)/lib -lonnxruntime -rpath $(ORT_DIR)/lib"'
+	@echo 'export CGO_LDFLAGS="-L$(ORT_DIR)/lib -lonnxruntime -Wl,-rpath,$(ORT_DIR)/lib"'
 	@echo 'export LD_LIBRARY_PATH="$(ORT_DIR)/lib:$${LD_LIBRARY_PATH:-}"'
 	@echo 'export DYLD_LIBRARY_PATH="$(ORT_DIR)/lib:$${DYLD_LIBRARY_PATH:-}"'
 
