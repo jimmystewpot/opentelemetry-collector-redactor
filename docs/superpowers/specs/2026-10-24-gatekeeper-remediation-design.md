@@ -35,7 +35,7 @@ Following the 6-pillar pre-production gatekeeper review and `receiving-code-revi
 5. **P0-5: Signal Coverage, Depth Bounding, Arena Sizing & Metric Collision Integrity**
    - **Trace Status Messages (`P0-5a`):** Add `TargetSpanStatusMessage` to `dedup.TargetKind` (`t.Span.Status().SetMessage(s)`) and collect `span.Status().Message()` in `processTraces`.
    - **Metric Exemplars (`P0-5b`):** Inspect `dp.Exemplars().At(e).FilteredAttributes()` across `Gauge`, `Sum`, `Histogram`, and `ExponentialHistogram` datapoints in `collectDataPointCandidates`.
-   - **Nesting Depth Enforcement (`P0-5c`):** Preserve the intentional `ValueTypeBytes` skip behavior, but when attribute nesting exceeds `maxNestingDepth` (32), record `redaction_skipped_total{reason="max_depth"}` and under `on_error: drop` scrub nested string values with `[REDACTED_UNINSPECTED]`.
+   - **Nesting Depth Enforcement (`P0-5c`):** Preserve the intentional `ValueTypeBytes` skip behaviour, but when attribute nesting exceeds `maxNestingDepth` (32), record `redaction_skipped_total{reason="max_depth"}` and under `on_error: drop` scrub nested string values with `[REDACTED_UNINSPECTED]`.
    - **Metric Collision Resolution (`P0-5d`):**
      - Only invoke `metricsmerge.ResolveCollisions(m)` on a `pmetric.Metric` when at least one attribute in that metric was actually modified by redaction (preserving untouched multi-timestamp Gauge batches while retaining Last-Timestamp-Wins merging for collided redacted Gauge series).
      - In `ResolveCollisions` for `MetricTypeExponentialHistogram`, merge `ZeroCount()` and bucket counts (`Positive()` and `Negative()`) when scale and offset align.
