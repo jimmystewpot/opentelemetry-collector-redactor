@@ -145,8 +145,9 @@ func (t *wordPieceTokenizer) Encode(text string, dstIDs []int64, dstOffsets []ty
 
 			// Punctuation, symbols, or CJK character treated as individual single-rune tokens
 			if isPunctOrCJK(r) {
-				word := strings.ToLower(text[byteIdx : byteIdx+size])
-				id, ok := t.vocab[word]
+				var runeBuf [utf8.UTFMax]byte
+				n := utf8.EncodeRune(runeBuf[:], unicode.ToLower(r))
+				id, ok := t.vocab[string(runeBuf[:n])]
 				if !ok {
 					id = t.unkID
 				}
@@ -180,6 +181,142 @@ func (t *wordPieceTokenizer) Encode(text string, dstIDs []int64, dstOffsets []ty
 }
 
 func (t *wordPieceTokenizer) tokenizeWord(text string, wordStart, wordEnd int, dstIDs []int64, dstOffsets []types.Offset) ([]int64, []types.Offset) {
+	rawLen := wordEnd - wordStart
+	if rawLen > t.maxInputChar {
+		dstIDs = append(dstIDs, t.unkID)
+		dstOffsets = append(dstOffsets, types.Offset{Start: wordStart, End: wordEnd})
+		return dstIDs, dstOffsets
+	}
+
+	prefixLen := len(t.prefix)
+	if prefixLen+rawLen > 256 {
+		return t.tokenizeWordSlow(text, wordStart, wordEnd, dstIDs, dstOffsets)
+	}
+
+	var buf [256]byte
+
+	// Fast path: ASCII lowercasing inline
+	isASCII := true
+	for i := 0; i < rawLen; i++ {
+		b := text[wordStart+i]
+		if b >= utf8.RuneSelf {
+			isASCII = false
+			break
+		}
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		buf[prefixLen+i] = b
+	}
+
+	lowercasedLen := rawLen
+	hasRuneLenChange := false
+	var textOffsets [257]uint8
+
+	if !isASCII {
+		srcRel := 0
+		dstRel := 0
+		for srcRel < rawLen {
+			textOffsets[dstRel] = uint8(srcRel)
+			r, sz := utf8.DecodeRuneInString(text[wordStart+srcRel : wordEnd])
+			rLow := unicode.ToLower(r)
+			encSz := utf8.EncodeRune(buf[prefixLen+dstRel:], rLow)
+			if encSz != sz {
+				hasRuneLenChange = true
+			}
+			srcRel += sz
+			dstRel += encSz
+			if prefixLen+dstRel > len(buf) {
+				return t.tokenizeWordSlow(text, wordStart, wordEnd, dstIDs, dstOffsets)
+			}
+		}
+		textOffsets[dstRel] = uint8(srcRel)
+		lowercasedLen = dstRel
+	}
+
+	if lowercasedLen > t.maxInputChar {
+		dstIDs = append(dstIDs, t.unkID)
+		dstOffsets = append(dstOffsets, types.Offset{Start: wordStart, End: wordEnd})
+		return dstIDs, dstOffsets
+	}
+
+	// First try exact whole word match
+	if id, ok := t.vocab[string(buf[prefixLen:prefixLen+lowercasedLen])]; ok {
+		dstIDs = append(dstIDs, id)
+		dstOffsets = append(dstOffsets, types.Offset{Start: wordStart, End: wordEnd})
+		return dstIDs, dstOffsets
+	}
+
+	// Subword segmentation
+	subStart := 0
+	isBad := false
+	startTokenCount := len(dstIDs)
+
+	var savedPrefix [32]byte
+	canUseSavedPrefix := prefixLen <= len(savedPrefix)
+
+	for subStart < lowercasedLen {
+		subEnd := lowercasedLen
+		curID := int64(-1)
+
+		if subStart > 0 {
+			if !canUseSavedPrefix {
+				return t.tokenizeWordSlow(text, wordStart, wordEnd, dstIDs[:startTokenCount], dstOffsets[:startTokenCount])
+			}
+			copy(savedPrefix[:prefixLen], buf[subStart:prefixLen+subStart])
+			copy(buf[subStart:prefixLen+subStart], t.prefix)
+		}
+
+		for subStart < subEnd {
+			var subStr string
+			if subStart == 0 {
+				subStr = string(buf[prefixLen : prefixLen+subEnd])
+			} else {
+				subStr = string(buf[subStart : prefixLen+subEnd])
+			}
+
+			if id, ok := t.vocab[subStr]; ok {
+				curID = id
+				break
+			}
+			// Backtrack by rune from buf[prefixLen+subStart : prefixLen+subEnd]
+			_, lastRuneSize := utf8.DecodeLastRune(buf[prefixLen+subStart : prefixLen+subEnd])
+			subEnd -= lastRuneSize
+		}
+
+		if subStart > 0 {
+			copy(buf[subStart:prefixLen+subStart], savedPrefix[:prefixLen])
+		}
+
+		if curID == -1 {
+			isBad = true
+			break
+		}
+
+		startOff := wordStart + subStart
+		endOff := wordStart + subEnd
+		if hasRuneLenChange {
+			startOff = wordStart + int(textOffsets[subStart])
+			endOff = wordStart + int(textOffsets[subEnd])
+		}
+
+		dstIDs = append(dstIDs, curID)
+		dstOffsets = append(dstOffsets, types.Offset{Start: startOff, End: endOff})
+		subStart = subEnd
+	}
+
+	if isBad {
+		// Roll back any partial subwords and emit single UNK token
+		dstIDs = dstIDs[:startTokenCount]
+		dstOffsets = dstOffsets[:startTokenCount]
+		dstIDs = append(dstIDs, t.unkID)
+		dstOffsets = append(dstOffsets, types.Offset{Start: wordStart, End: wordEnd})
+	}
+
+	return dstIDs, dstOffsets
+}
+
+func (t *wordPieceTokenizer) tokenizeWordSlow(text string, wordStart, wordEnd int, dstIDs []int64, dstOffsets []types.Offset) ([]int64, []types.Offset) {
 	word := strings.ToLower(text[wordStart:wordEnd])
 	if len(word) > t.maxInputChar {
 		dstIDs = append(dstIDs, t.unkID)

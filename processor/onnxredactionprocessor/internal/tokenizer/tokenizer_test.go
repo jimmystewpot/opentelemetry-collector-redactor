@@ -3,6 +3,7 @@ package tokenizer
 import (
 	"path/filepath"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -112,3 +113,129 @@ func TestWordPieceTokenizer_TokenIDsMatching(t *testing.T) {
 	assert.Equal(t, types.Offset{Start: 4, End: 8}, offsets[2])  // "user"
 	assert.Equal(t, types.Offset{Start: 9, End: 14}, offsets[3]) // "alice"
 }
+
+func TestWordPieceTokenizer_ZeroAllocations(t *testing.T) {
+	if raceEnabled {
+		t.Skip("skipping zero-allocation assertion under -race due to runtime map lookup instrumentation")
+	}
+
+	tok, err := NewWordPieceTokenizer(filepath.Join("..", "..", "testdata", "tokenizer.json"), "")
+	require.NoError(t, err)
+
+	ids := make([]int64, 0, 64)
+	offsets := make([]types.Offset, 0, 64)
+	input := "User AliceSmith and BobDoe logged in from HTTP API"
+
+	allocs := testing.AllocsPerRun(100, func() {
+		ids, offsets, err = tok.Encode(input, ids[:0], offsets[:0])
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	assert.Equal(t, float64(0), allocs, "WordPiece Encode must perform 0 heap allocations with preallocated buffers")
+}
+
+func TestWordPieceTokenizer_RuneLengthChangeOffsets(t *testing.T) {
+	tok, err := NewWordPieceTokenizer(filepath.Clean(validTokenizerPath), validSHA256)
+	require.NoError(t, err)
+	defer func() { _ = tok.Close() }()
+
+	// 'İ' is U+0130 (2 bytes) lowercasing to 'i' (1 byte)
+	// 'K' is U+212A (3 bytes) lowercasing to 'k' (1 byte)
+	texts := []string{
+		"İzmir",
+		"Kelvin",
+		"İzmir and Kelvin",
+	}
+
+	for _, text := range texts {
+		ids, offsets, err := tok.Encode(text, nil, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, ids)
+
+		for i, off := range offsets {
+			assert.GreaterOrEqual(t, off.Start, 0)
+			assert.LessOrEqual(t, off.End, len(text))
+			assert.LessOrEqual(t, off.Start, off.End)
+			if off.Start < len(text) {
+				assert.True(t, utf8.RuneStart(text[off.Start]), "offset %d start %d must be rune boundary", i, off.Start)
+			}
+			if off.End < len(text) {
+				assert.True(t, utf8.RuneStart(text[off.End]), "offset %d end %d must be rune boundary", i, off.End)
+			}
+		}
+	}
+}
+
+func TestWordPieceTokenizer_FastSlowDifferential(t *testing.T) {
+	tokIface, err := NewWordPieceTokenizer(filepath.Clean(validTokenizerPath), validSHA256)
+	require.NoError(t, err)
+	defer func() { _ = tokIface.Close() }()
+
+	tok := tokIface.(*wordPieceTokenizer)
+
+	words := []string{
+		"alice",
+		"Alice",
+		"ALICE",
+		"AliceSmith",
+		"BobDoe",
+		"User",
+		"HTTP",
+		"API",
+		"Müller",
+		"Zürich",
+		"supercalifragilisticexpialidocious",
+		"İzmir",
+		"Kelvin",
+		"unknownwordxyz1234567890",
+		"a",
+		"A",
+		"12345",
+	}
+
+	for _, w := range words {
+		var fastIDs []int64
+		var fastOffsets []types.Offset
+		fastIDs, fastOffsets = tok.tokenizeWord(w, 0, len(w), fastIDs, fastOffsets)
+
+		var slowIDs []int64
+		var slowOffsets []types.Offset
+		slowIDs, slowOffsets = tok.tokenizeWordSlow(w, 0, len(w), slowIDs, slowOffsets)
+
+		assert.Equal(t, slowIDs, fastIDs, "word %q: token IDs mismatch between fast and slow path", w)
+		// For words without rune length change, offsets must match slow path
+		var hasChange bool
+		for _, r := range w {
+			if len(string(r)) != len(string(unicode.ToLower(r))) {
+				hasChange = true
+				break
+			}
+		}
+		if !hasChange {
+			assert.Equal(t, slowOffsets, fastOffsets, "word %q: offsets mismatch between fast and slow path", w)
+		}
+	}
+}
+
+
+func BenchmarkWordPieceTokenizer_Encode(b *testing.B) {
+	tok, err := NewWordPieceTokenizer(filepath.Join("..", "..", "testdata", "tokenizer.json"), "")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	ids := make([]int64, 0, 64)
+	offsets := make([]types.Offset, 0, 64)
+	input := "User AliceSmith and BobDoe logged in from HTTP API"
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ids, offsets, err = tok.Encode(input, ids[:0], offsets[:0])
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
