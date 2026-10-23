@@ -37,7 +37,7 @@ CGO_LDFLAGS ?= -L$(ORT_DIR)/lib -lonnxruntime -Wl,-rpath,$(ORT_DIR)/lib
 export CGO_CFLAGS
 export CGO_LDFLAGS
 
-.PHONY: all fmt lint test bench clean download-ort
+.PHONY: all fmt lint test bench clean download-ort download-ort-linux-amd64 download-ort-linux-arm64 download-ort-darwin-arm64 download-ort-darwin-amd64 print-env
 
 all: fmt lint test
 
@@ -53,6 +53,12 @@ test:
 bench:
 	@cd processor/onnxredactionprocessor && $(GO) test -bench=. -benchmem -run=^$$ ./...
 
+print-env:
+	@echo 'export CGO_CFLAGS="-I$(ORT_DIR)/include"'
+	@echo 'export CGO_LDFLAGS="-L$(ORT_DIR)/lib -lonnxruntime -rpath $(ORT_DIR)/lib"'
+	@echo 'export LD_LIBRARY_PATH="$(ORT_DIR)/lib:$${LD_LIBRARY_PATH:-}"'
+	@echo 'export DYLD_LIBRARY_PATH="$(ORT_DIR)/lib:$${DYLD_LIBRARY_PATH:-}"'
+
 download-ort:
 	@if [ ! -d "$(ORT_DIR)/include" ]; then \
 		echo "Downloading ONNX Runtime $(ORT_VERSION) for $(ORT_OS)-$(ORT_ARCH)..."; \
@@ -65,6 +71,43 @@ download-ort:
 	else \
 		echo "ONNX Runtime already present at $(ORT_DIR)"; \
 	fi
+
+download-ort-linux-amd64:
+	@mkdir -p $(ORT_DIR); \
+	echo "Downloading ONNX Runtime $(ORT_VERSION) for linux-x64..."; \
+	curl -sSL -o /tmp/onnxruntime-linux-x64-$(ORT_VERSION).tgz https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/onnxruntime-linux-x64-$(ORT_VERSION).tgz; \
+	tar -xzf /tmp/onnxruntime-linux-x64-$(ORT_VERSION).tgz -C /tmp; \
+	cp -r /tmp/onnxruntime-linux-x64-$(ORT_VERSION)/* $(ORT_DIR)/; \
+	rm -rf /tmp/onnxruntime-linux-x64-$(ORT_VERSION).tgz /tmp/onnxruntime-linux-x64-$(ORT_VERSION); \
+	echo "ONNX Runtime unpacked into $(ORT_DIR)"
+
+download-ort-linux-arm64:
+	@mkdir -p $(ORT_DIR); \
+	echo "Downloading ONNX Runtime $(ORT_VERSION) for linux-aarch64..."; \
+	curl -sSL -o /tmp/onnxruntime-linux-aarch64-$(ORT_VERSION).tgz https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/onnxruntime-linux-aarch64-$(ORT_VERSION).tgz; \
+	tar -xzf /tmp/onnxruntime-linux-aarch64-$(ORT_VERSION).tgz -C /tmp; \
+	cp -r /tmp/onnxruntime-linux-aarch64-$(ORT_VERSION)/* $(ORT_DIR)/; \
+	rm -rf /tmp/onnxruntime-linux-aarch64-$(ORT_VERSION).tgz /tmp/onnxruntime-linux-aarch64-$(ORT_VERSION); \
+	echo "ONNX Runtime unpacked into $(ORT_DIR)"
+
+download-ort-darwin-arm64:
+	@mkdir -p $(ORT_DIR); \
+	echo "Downloading ONNX Runtime $(ORT_VERSION) for osx-arm64..."; \
+	curl -sSL -o /tmp/onnxruntime-osx-arm64-$(ORT_VERSION).tgz https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/onnxruntime-osx-arm64-$(ORT_VERSION).tgz; \
+	tar -xzf /tmp/onnxruntime-osx-arm64-$(ORT_VERSION).tgz -C /tmp; \
+	cp -r /tmp/onnxruntime-osx-arm64-$(ORT_VERSION)/* $(ORT_DIR)/; \
+	rm -rf /tmp/onnxruntime-osx-arm64-$(ORT_VERSION).tgz /tmp/onnxruntime-osx-arm64-$(ORT_VERSION); \
+	echo "ONNX Runtime unpacked into $(ORT_DIR)"
+
+download-ort-darwin-amd64:
+	@mkdir -p $(ORT_DIR); \
+	echo "Downloading ONNX Runtime $(ORT_VERSION) for osx-x86_64..."; \
+	curl -sSL -o /tmp/onnxruntime-osx-x86_64-$(ORT_VERSION).tgz https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/onnxruntime-osx-x86_64-$(ORT_VERSION).tgz; \
+	tar -xzf /tmp/onnxruntime-osx-x86_64-$(ORT_VERSION).tgz -C /tmp; \
+	cp -r /tmp/onnxruntime-osx-x86_64-$(ORT_VERSION)/* $(ORT_DIR)/; \
+	rm -rf /tmp/onnxruntime-osx-x86_64-$(ORT_VERSION).tgz /tmp/onnxruntime-osx-x86_64-$(ORT_VERSION); \
+	echo "ONNX Runtime unpacked into $(ORT_DIR)"
+
 
 clean:
 	@rm -rf bin/ $(ORT_DIR)

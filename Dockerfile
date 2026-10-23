@@ -1,11 +1,9 @@
 # syntax=docker/dockerfile:1
-FROM --platform=linux/arm64 golang:1.27-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 
-# Pinned dependencies
+ARG TARGETARCH
 ARG ORT_VERSION=1.31.0
-ARG ORT_SHA256=c5b8b3cca31f3d643a3b313b8f42e2d0f16a4fcefd02cda343d97bd5306afaab
 ARG OCB_VERSION=0.163.2
-ARG OCB_SHA256=d8c9453a5eb95131441eca1678cb3e925d12e8a14848ceb19b7c0f41e973caf3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -14,18 +12,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and verify ONNX Runtime for linux/arm64
 WORKDIR /tmp
-RUN curl -sSL -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-aarch64-${ORT_VERSION}.tgz" \
-    && echo "${ORT_SHA256}  onnxruntime.tgz" | sha256sum -c - \
-    && mkdir -p /opt/onnxruntime \
-    && tar -xzf onnxruntime.tgz -C /opt/onnxruntime --strip-components=1 \
-    && rm onnxruntime.tgz
 
-# Download and verify ocb (OpenTelemetry Collector Builder)
-RUN curl -sSL -o /usr/local/bin/ocb "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2Fv${OCB_VERSION}/ocb_${OCB_VERSION}_linux_arm64" \
-    && echo "${OCB_SHA256}  /usr/local/bin/ocb" | sha256sum -c - \
-    && chmod +x /usr/local/bin/ocb
+# Download and verify ONNX Runtime and ocb based on TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) \
+            ORT_ARCH="x64"; \
+            ORT_SHA256="cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57"; \
+            OCB_ARCH="linux_amd64"; \
+            OCB_SHA256="2aea100793a07cdf396972ca6ab3b137163367399045a2052bd89ba92362a4d5"; \
+            ;; \
+        arm64) \
+            ORT_ARCH="aarch64"; \
+            ORT_SHA256="c5b8b3cca31f3d643a3b313b8f42e2d0f16a4fcefd02cda343d97bd5306afaab"; \
+            OCB_ARCH="linux_arm64"; \
+            OCB_SHA256="d8c9453a5eb95131441eca1678cb3e925d12e8a14848ceb19b7c0f41e973caf3"; \
+            ;; \
+        *) \
+            echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; \
+            exit 1; \
+            ;; \
+    esac; \
+    curl -sSL -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}.tgz"; \
+    echo "${ORT_SHA256}  onnxruntime.tgz" | sha256sum -c -; \
+    mkdir -p /opt/onnxruntime; \
+    tar -xzf onnxruntime.tgz -C /opt/onnxruntime --strip-components=1; \
+    rm onnxruntime.tgz; \
+    curl -sSL -o /usr/local/bin/ocb "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2Fv${OCB_VERSION}/ocb_${OCB_VERSION}_${OCB_ARCH}"; \
+    echo "${OCB_SHA256}  /usr/local/bin/ocb" | sha256sum -c -; \
+    chmod +x /usr/local/bin/ocb
 
 WORKDIR /src
 COPY . .
@@ -37,7 +53,7 @@ ENV CGO_LDFLAGS="-L/opt/onnxruntime/lib -lonnxruntime -Wl,-rpath,/usr/local/lib"
 RUN ocb --config=builder-config.yaml
 
 # Runtime image
-FROM --platform=linux/arm64 debian:bookworm-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
