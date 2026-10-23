@@ -337,6 +337,27 @@ docker run --gpus all --rm \
 
 ## 5. Resilience & Operational Troubleshooting
 
+### CPU Fallback & Fail-Safe Strategy
+
+To maintain high availability and prevent telemetry loss during hardware or driver failure, implement a two-stage fallback architecture:
+
+1. **Initialisation-Time Provider Fallback:**
+   When initialising the ONNX Runtime session, attempt to register the CUDA or ROCm execution provider first. If the GPU driver returns an initialisation error (e.g. `CUDA driver version is insufficient`, driver missing, or hardware unavailable), log a warning and fall back cleanly to the default CPU Execution Provider:
+   ```c
+   // Attempt CUDA initialisation; fall back to CPU provider if unavailable
+   if (ort_shim_enable_cuda(opts, device_id, &cuda_err) != 0) {
+       fprintf(stderr, "ort: GPU initialisation failed (%s), falling back to CPU provider\n", cuda_err);
+       free(cuda_err);
+       // Session creation proceeds with standard CPU execution provider
+   }
+   ```
+   This ensures that nodes undergoing GPU driver maintenance or container hosts without GPU passthrough continue processing telemetry without crash loops.
+
+2. **Runtime VRAM OOM Degradation:**
+   If a GPU inference pass fails at runtime due to transient VRAM exhaustion:
+   - When configured with `on_error: drop` (fail-closed mode), uninspected strings are scrubbed in-place with `[REDACTED_UNINSPECTED]` and a retryable gRPC error is returned upstream, shedding load until VRAM pressure subsides.
+   - For hybrid architectures, requests encountering consecutive GPU timeouts can be rerouted through a standby CPU session instance or fallback queue.
+
 ### GPU Out-of-Memory (VRAM OOM)
 - **Symptom:** ONNX Runtime reports `CUDA failure 2: out of memory`.
 - **Mitigation:**

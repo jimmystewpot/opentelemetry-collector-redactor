@@ -87,7 +87,7 @@ For bare-metal servers or enterprise virtual machines running without Kubernetes
 3. Copy configuration file and neural model artefacts:
    ```bash
    sudo cp config.yaml /etc/otel/config.yaml
-   sudo cp processor/onnxredactionprocessor/testdata/tiny_ner.onnx /etc/otel/models/model.onnx
+   sudo cp processor/onnxredactionprocessor/testdata/tiny_ner.onnx /etc/otel/models/tiny_ner.onnx
    sudo cp processor/onnxredactionprocessor/testdata/tokenizer.json /etc/otel/models/tokenizer.json
    sudo chown -R otel:otel /etc/otel /var/log/otel
    ```

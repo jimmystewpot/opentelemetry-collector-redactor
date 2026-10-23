@@ -44,12 +44,12 @@ The processor communicates with Microsoft's ONNX Runtime C library (`libonnxrunt
 
 ### The Role of `@rpath` vs. `DYLD_LIBRARY_PATH`
 On Linux, dynamic libraries are frequently resolved using `LD_LIBRARY_PATH`. On macOS, however:
-- **System Integrity Protection (SIP):** When any process is executed by or passes through system-protected binaries (such as `/bin/sh` or IDE run launchers), macOS actively strips `DYLD_LIBRARY_PATH` from the environment for security reasons.
+- **System Integrity Protection (SIP):** When any process is executed by system-protected shells (`/bin/sh`, `/bin/zsh`), launched via `launchd` service managers, or spawned from IDE run launchers, macOS actively purges `DYLD_LIBRARY_PATH` from the process environment for security reasons.
 - **Embedded Runpath (`@rpath`):** To ensure the compiled collector binary can locate `libonnxruntime.dylib` regardless of environment sanitisation, the search path must be baked into the Mach-O binary header using the `-Wl,-rpath` linker directive.
 
 The repository `Makefile` automatically configures this:
 ```bash
-CGO_LDFLAGS="-L$(CURDIR)/.ort/lib -lonnxruntime -rpath $(CURDIR)/.ort/lib"
+CGO_LDFLAGS="-L$(CURDIR)/.ort/lib -lonnxruntime -Wl,-rpath,$(CURDIR)/.ort/lib"
 ```
 
 ### Inspecting Mach-O Binary Headers
@@ -78,7 +78,7 @@ Apple Silicon processors (M1 through M4) implement 128-bit ARM NEON vector execu
 ONNX Runtime supports an optional Apple CoreML execution provider (`OrtSessionOptionsAppendExecutionProvider_CoreML`), which targets the Apple Neural Engine (ANE). 
 
 However, for telemetry redaction, the standard CPU execution provider is strongly recommended over CoreML:
-1. **Compilation Overhead:** CoreML compiles the ONNX graph into a `.mlmodelc` bundle upon startup, introducing a 20 to 40 second initialise delay.
+1. **Compilation Overhead:** CoreML compiles the ONNX graph into a `.mlmodelc` bundle upon startup, introducing a 20 to 40 second initialisation delay.
 2. **Tensor Marshalling Latency:** For the typical small sequence lengths (32 to 256 tokens) and sliding batch sizes encountered in real-time telemetry streaming, the latency penalty of copying tensors across the CPU-ANE memory bus exceeds the neural execution savings.
 3. **Deterministic Memory Arena:** The CPU provider recycles buffers within a pre-allocated heap arena, avoiding heap thrashing.
 
@@ -118,8 +118,15 @@ Sign the binary for local execution:
 codesign -s - --force ./bin/otelcol-onnxredactor
 ```
 
-### Step 6: Start the Collector Daemon
-Launch the collector using the local configuration file:
+### Step 6: Prepare Local Model Files & Start the Collector Daemon
+By default, `config.yaml` references `/etc/otel/models/tiny_ner.onnx`. For local testing, populate the model files or adjust `path` in `config.yaml` to point directly to `./processor/onnxredactionprocessor/testdata/`:
+```bash
+sudo mkdir -p /etc/otel/models
+sudo cp processor/onnxredactionprocessor/testdata/tiny_ner.onnx /etc/otel/models/
+sudo cp processor/onnxredactionprocessor/testdata/tokenizer.json /etc/otel/models/
+```
+
+Launch the collector using the configuration file:
 ```bash
 ./bin/otelcol-onnxredactor --config=config.yaml
 ```

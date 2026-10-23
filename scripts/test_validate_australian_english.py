@@ -18,9 +18,16 @@ class TestValidateAustralianEnglish(unittest.TestCase):
         We optimize the quantized model artifacts with specialized behavior.
         The system will initialize under Apache License.
         Centralized logging centers on serialization efficiency.
+        The optimizer and quantizer assist the serializer and initializer.
+        He was centering the text while it was centered.
         """
         violations = check_text(us_text)
-        expected_words = {"optimize", "quantized", "artifacts", "specialized", "behavior", "initialize", "license", "centralized", "centers", "serialization"}
+        expected_words = {
+            "optimize", "quantized", "artifacts", "specialized", "behavior",
+            "initialize", "license", "centralized", "centers", "serialization",
+            "optimizer", "quantizer", "serializer", "initializer",
+            "centering", "centered"
+        }
         detected_words = {v["matched"].lower() for v in violations}
         self.assertTrue(expected_words.issubset(detected_words), f"Missing violations: {expected_words - detected_words}")
 
