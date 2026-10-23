@@ -1,0 +1,401 @@
+package onnxredactionprocessor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/processor"
+
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/arena"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/bucket"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/coalesce"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/decode"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/dedup"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/detect"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/filter"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/metricsmerge"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/ort"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/tokenizer"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/window"
+)
+
+var (
+	_ processor.Logs    = (*redactionProcessor)(nil)
+	_ processor.Traces  = (*redactionProcessor)(nil)
+	_ processor.Metrics = (*redactionProcessor)(nil)
+)
+
+var defaultIDToBIO = []string{
+	"O",
+	"B-PERSON", "I-PERSON",
+	"B-EMAIL", "I-EMAIL",
+	"B-PHONE", "I-PHONE",
+	"B-LOCATION", "I-LOCATION",
+	"B-CREDIT_CARD", "I-CREDIT_CARD",
+	"B-SSN", "I-SSN",
+	"B-IBAN", "I-IBAN",
+	"B-MEDICAL_ID", "I-MEDICAL_ID",
+	"B-PATH_USER", "I-PATH_USER",
+}
+
+type redactionProcessor struct {
+	cfg         *Config
+	telemetry   *telemetry
+	coalescer   *coalesce.Coalescer
+	detector    detect.Detector
+	nextLogs    consumer.Logs
+	nextTraces  consumer.Traces
+	nextMetrics consumer.Metrics
+}
+
+func newProcessor(
+	cfg *Config,
+	set *component.TelemetrySettings,
+	tok tokenizer.Tokenizer,
+	det detect.Detector,
+) (*redactionProcessor, error) {
+	if cfg == nil {
+		return nil, errors.New("onnxredaction: config is nil")
+	}
+
+	tel, err := newTelemetry(set, "1.31.0", cfg.Model.SHA256, "mlas")
+	if err != nil {
+		return nil, fmt.Errorf("onnxredaction: failed to initialize telemetry: %w", err)
+	}
+
+	if tok == nil {
+		if cfg.Model.TokenizerPath == "" {
+			return nil, errors.New("onnxredaction: model.tokenizer_path is required")
+		}
+		tok, err = tokenizer.NewWordPieceTokenizer(cfg.Model.TokenizerPath, cfg.Model.TokenizerSHA256)
+		if err != nil {
+			return nil, fmt.Errorf("onnxredaction: failed to load tokenizer: %w", err)
+		}
+	}
+
+	if det == nil {
+		if cfg.Model.Path == "" {
+			return nil, errors.New("onnxredaction: model.path is required")
+		}
+		dec := decode.NewDecoder(defaultIDToBIO, nil, float32(cfg.Inference.ConfidenceThreshold))
+		det, err = ort.NewEngine(
+			cfg.Model.Path,
+			cfg.Model.SHA256,
+			cfg.Model.Session.IntraOpThreads,
+			cfg.Model.Session.ConcurrentRuns,
+			cfg.Model.Session.AllowSpinning,
+			dec,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("onnxredaction: failed to initialize ORT engine: %w", err)
+		}
+	}
+
+	filt := filter.New(cfg.Filtering.MinStringLength, cfg.Filtering.ExcludeAttributes)
+	chunker := window.NewChunker(cfg.Inference.WindowTokens, cfg.Inference.WindowOverlapTokens, cfg.Inference.MaxPayloadBytes)
+	bucketer := bucket.New(cfg.Inference.LengthBuckets, cfg.Inference.MaxTensorBatchSize)
+	arenaPool := arena.NewPool(cfg.Inference.MaxTensorBatchSize, 256, 19)
+
+	c := coalesce.New(
+		cfg.Inference.CoalesceWindow,
+		cfg.Inference.CoalesceMaxStrings,
+		filt,
+		tok,
+		chunker,
+		bucketer,
+		det,
+		arenaPool,
+		cfg.Inference.MaxPayloadBytes,
+		cfg.OnError,
+		cfg.DryRun,
+		coalesce.WithTimeout(cfg.Inference.Timeout),
+		coalesce.WithTelemetry(tel),
+		coalesce.WithConcurrentRuns(cfg.Model.Session.ConcurrentRuns),
+	)
+
+	return &redactionProcessor{
+		cfg:       cfg,
+		telemetry: tel,
+		coalescer: c,
+		detector:  det,
+	}, nil
+}
+
+func (p *redactionProcessor) Start(ctx context.Context, host component.Host) error {
+	if p.cfg.Inference.WarmupOnStart && p.detector != nil {
+		if err := p.detector.Warmup(ctx); err != nil {
+			return fmt.Errorf("onnxredaction: detector warmup failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func (p *redactionProcessor) Shutdown(ctx context.Context) error {
+	var errs []error
+	if p.coalescer != nil {
+		if err := p.coalescer.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if p.detector != nil {
+		if err := p.detector.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (p *redactionProcessor) Capabilities() consumer.Capabilities {
+	return consumer.Capabilities{MutatesData: true}
+}
+
+func (p *redactionProcessor) processLogs(ctx context.Context, ld plog.Logs) error {
+	if ld.LogRecordCount() == 0 {
+		return nil
+	}
+
+	items := make([]coalesce.Item, 0, ld.LogRecordCount()*2)
+	rLogs := ld.ResourceLogs()
+	for i := 0; i < rLogs.Len(); i++ {
+		rl := rLogs.At(i)
+		collectMapCandidates("logs", rl.Resource().Attributes(), &items)
+		sLogs := rl.ScopeLogs()
+		for j := 0; j < sLogs.Len(); j++ {
+			sl := sLogs.At(j)
+			collectMapCandidates("logs", sl.Scope().Attributes(), &items)
+			records := sl.LogRecords()
+			for k := 0; k < records.Len(); k++ {
+				rec := records.At(k)
+				collectMapCandidates("logs", rec.Attributes(), &items)
+				body := rec.Body()
+				if body.Type() == pcommon.ValueTypeBytes {
+					p.telemetry.RecordSkipped("bytes_body", 1)
+				} else {
+					collectValueCandidates("logs", "body", body, &items, 0)
+				}
+			}
+		}
+	}
+
+	p.telemetry.RecordInspected("logs", len(items))
+	return p.coalescer.Submit(ctx, items)
+}
+
+func (p *redactionProcessor) ConsumeLogs(ctx context.Context, ld plog.Logs) error {
+	if err := p.processLogs(ctx, ld); err != nil {
+		return err
+	}
+	if p.nextLogs != nil {
+		return p.nextLogs.ConsumeLogs(ctx, ld)
+	}
+	return nil
+}
+
+func (p *redactionProcessor) processTraces(ctx context.Context, td ptrace.Traces) error {
+	if td.SpanCount() == 0 {
+		return nil
+	}
+
+	items := make([]coalesce.Item, 0, td.SpanCount()*3)
+	rSpans := td.ResourceSpans()
+	for i := 0; i < rSpans.Len(); i++ {
+		rs := rSpans.At(i)
+		collectMapCandidates("traces", rs.Resource().Attributes(), &items)
+		sSpans := rs.ScopeSpans()
+		for j := 0; j < sSpans.Len(); j++ {
+			ss := sSpans.At(j)
+			collectMapCandidates("traces", ss.Scope().Attributes(), &items)
+			spans := ss.Spans()
+			for k := 0; k < spans.Len(); k++ {
+				span := spans.At(k)
+				items = append(items, coalesce.Item{
+					Signal: "traces",
+					Key:    "span.name",
+					Text:   span.Name(),
+					Target: dedup.MutationTarget{Kind: dedup.TargetSpanName, Span: span},
+				})
+				collectMapCandidates("traces", span.Attributes(), &items)
+				events := span.Events()
+				for e := 0; e < events.Len(); e++ {
+					ev := events.At(e)
+					items = append(items, coalesce.Item{
+						Signal: "traces",
+						Key:    "event.name",
+						Text:   ev.Name(),
+						Target: dedup.MutationTarget{Kind: dedup.TargetSpanEventName, SpanEvent: ev},
+					})
+					collectMapCandidates("traces", ev.Attributes(), &items)
+				}
+				links := span.Links()
+				for l := 0; l < links.Len(); l++ {
+					link := links.At(l)
+					collectMapCandidates("traces", link.Attributes(), &items)
+				}
+			}
+		}
+	}
+
+	p.telemetry.RecordInspected("traces", len(items))
+	return p.coalescer.Submit(ctx, items)
+}
+
+func (p *redactionProcessor) ConsumeTraces(ctx context.Context, td ptrace.Traces) error {
+	if err := p.processTraces(ctx, td); err != nil {
+		return err
+	}
+	if p.nextTraces != nil {
+		return p.nextTraces.ConsumeTraces(ctx, td)
+	}
+	return nil
+}
+
+func (p *redactionProcessor) processMetrics(ctx context.Context, md pmetric.Metrics) error {
+	if md.DataPointCount() == 0 {
+		return nil
+	}
+
+	items := make([]coalesce.Item, 0, md.DataPointCount()*2)
+	rMetrics := md.ResourceMetrics()
+	for i := 0; i < rMetrics.Len(); i++ {
+		rm := rMetrics.At(i)
+		collectMapCandidates("metrics", rm.Resource().Attributes(), &items)
+		sMetrics := rm.ScopeMetrics()
+		for j := 0; j < sMetrics.Len(); j++ {
+			sm := sMetrics.At(j)
+			collectMapCandidates("metrics", sm.Scope().Attributes(), &items)
+			metrics := sm.Metrics()
+			for k := 0; k < metrics.Len(); k++ {
+				m := metrics.At(k)
+				items = append(items,
+					coalesce.Item{
+						Signal: "metrics",
+						Key:    "metric.name",
+						Text:   m.Name(),
+						Target: dedup.MutationTarget{Kind: dedup.TargetMetricName, Metric: m, MetricName: m.Name()},
+					},
+					coalesce.Item{
+						Signal: "metrics",
+						Key:    "metric.description",
+						Text:   m.Description(),
+						Target: dedup.MutationTarget{Kind: dedup.TargetMetricDescription, Metric: m, MetricName: m.Name()},
+					},
+				)
+				collectDataPointCandidates(m, &items)
+			}
+		}
+	}
+
+	p.telemetry.RecordInspected("metrics", len(items))
+
+	if err := p.coalescer.Submit(ctx, items); err != nil {
+		return err
+	}
+
+	// After redaction, resolve collisions across metric datapoints
+	for i := 0; i < rMetrics.Len(); i++ {
+		rm := rMetrics.At(i)
+		sMetrics := rm.ScopeMetrics()
+		for j := 0; j < sMetrics.Len(); j++ {
+			sm := sMetrics.At(j)
+			metrics := sm.Metrics()
+			for k := 0; k < metrics.Len(); k++ {
+				m := metrics.At(k)
+				stats := metricsmerge.ResolveCollisions(m)
+				for mType, cnt := range stats.CollisionsByType {
+					p.telemetry.RecordMetricCollision(mType.String(), cnt)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (p *redactionProcessor) ConsumeMetrics(ctx context.Context, md pmetric.Metrics) error {
+	if err := p.processMetrics(ctx, md); err != nil {
+		return err
+	}
+	if p.nextMetrics != nil {
+		return p.nextMetrics.ConsumeMetrics(ctx, md)
+	}
+	return nil
+}
+
+const maxNestingDepth = 32
+
+func collectMapCandidates(signal string, m pcommon.Map, items *[]coalesce.Item) {
+	collectMapCandidatesWithMetric(signal, m, items, "")
+}
+
+func collectMapCandidatesWithMetric(signal string, m pcommon.Map, items *[]coalesce.Item, metricName string) {
+	m.Range(func(k string, v pcommon.Value) bool {
+		collectValueCandidatesWithMetric(signal, k, v, items, 0, metricName)
+		return true
+	})
+}
+
+func collectValueCandidates(signal, key string, val pcommon.Value, items *[]coalesce.Item, depth int) {
+	collectValueCandidatesWithMetric(signal, key, val, items, depth, "")
+}
+
+func collectValueCandidatesWithMetric(signal, key string, val pcommon.Value, items *[]coalesce.Item, depth int, metricName string) {
+	if depth > maxNestingDepth {
+		return
+	}
+	switch val.Type() {
+	case pcommon.ValueTypeStr:
+		*items = append(*items, coalesce.Item{
+			Signal: signal,
+			Key:    key,
+			Text:   val.Str(),
+			Target: dedup.MutationTarget{Kind: dedup.TargetPCommonValue, Val: val, MetricName: metricName},
+		})
+	case pcommon.ValueTypeMap:
+		val.Map().Range(func(k string, v pcommon.Value) bool {
+			collectValueCandidatesWithMetric(signal, k, v, items, depth+1, metricName)
+			return true
+		})
+	case pcommon.ValueTypeSlice:
+		slice := val.Slice()
+		for i := 0; i < slice.Len(); i++ {
+			collectValueCandidatesWithMetric(signal, key, slice.At(i), items, depth+1, metricName)
+		}
+	}
+}
+
+func collectDataPointCandidates(m pmetric.Metric, items *[]coalesce.Item) {
+	name := m.Name()
+	switch m.Type() {
+	case pmetric.MetricTypeGauge:
+		dps := m.Gauge().DataPoints()
+		for i := 0; i < dps.Len(); i++ {
+			collectMapCandidatesWithMetric("metrics", dps.At(i).Attributes(), items, name)
+		}
+	case pmetric.MetricTypeSum:
+		dps := m.Sum().DataPoints()
+		for i := 0; i < dps.Len(); i++ {
+			collectMapCandidatesWithMetric("metrics", dps.At(i).Attributes(), items, name)
+		}
+	case pmetric.MetricTypeHistogram:
+		dps := m.Histogram().DataPoints()
+		for i := 0; i < dps.Len(); i++ {
+			collectMapCandidatesWithMetric("metrics", dps.At(i).Attributes(), items, name)
+		}
+	case pmetric.MetricTypeExponentialHistogram:
+		dps := m.ExponentialHistogram().DataPoints()
+		for i := 0; i < dps.Len(); i++ {
+			collectMapCandidatesWithMetric("metrics", dps.At(i).Attributes(), items, name)
+		}
+	case pmetric.MetricTypeSummary:
+		dps := m.Summary().DataPoints()
+		for i := 0; i < dps.Len(); i++ {
+			collectMapCandidatesWithMetric("metrics", dps.At(i).Attributes(), items, name)
+		}
+	}
+}

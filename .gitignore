@@ -1,0 +1,25 @@
+# Virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Go build & test artifacts
+bin/
+*.test
+*.out
+*.prof
+
+# CGo object files
+*.o
+*.a
+*.so
+*.dylib
+.ort/
+
+# Local development / editor
+.DS_Store
+.idea/
+.vscode/
+.superpowers
+docs/superpowers
+docs/phase0

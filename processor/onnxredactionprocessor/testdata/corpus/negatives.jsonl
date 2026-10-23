@@ -1,0 +1,15 @@
+{"text": "System library loaded: /usr/lib/libssl.so"}
+{"text": "Log written to /var/log/syslog at rotation"}
+{"text": "Host lookup resolved via /etc/hosts"}
+{"text": "Token mounted at /var/run/secrets/kubernetes.io/serviceaccount/token"}
+{"text": "Generated transaction UUID c9a646d3-9c61-4cc9-bc86-7a1361c47f7d"}
+{"text": "Digest sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 verified"}
+{"text": "Release version v1.20.1 deployed to cluster"}
+{"text": "Package candidate 2.4.0-rc1 tagged in git"}
+{"text": "Event timestamp 2026-10-23T18:30:00Z registered"}
+{"text": "Trace origin at github.com/foo/bar/pkg.go:123 executed"}
+{"text": "Numeric identifier 1234567890 processed"}
+{"text": "Root filesystem mounted on /dev/sda1"}
+{"text": "Configuration loaded from /etc/otel/collector.yaml"}
+{"text": "Temporary directory /tmp/runtime-pipe opened"}
+{"text": "Static binary /bin/busybox invoked"}

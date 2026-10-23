@@ -1,0 +1,29 @@
+# Dependabot configuration for vector-onnx-redactor
+version: 2
+updates:
+  # Maintain Go dependencies for the custom ONNX redaction processor
+  - package-ecosystem: "gomod"
+    directory: "/processor/onnxredactionprocessor"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 10
+
+  # Maintain container base images in Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 10
+
+  # Maintain GitHub Actions workflow dependencies
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 10

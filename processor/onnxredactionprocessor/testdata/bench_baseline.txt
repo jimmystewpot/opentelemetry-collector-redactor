@@ -1,0 +1,21 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor
+cpu: Apple M5
+BenchmarkMask_CleanString-10          	215573718	         5.539 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMask_CleanString-10          	221331957	         5.468 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMask_CleanString-10          	212295819	         5.540 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMask_CleanString-10          	216114826	         5.507 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMask_CleanString-10          	215901877	         5.617 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMask_DirtyString-10          	10162905	       117.9 ns/op	     328 B/op	       8 allocs/op
+BenchmarkMask_DirtyString-10          	10323345	       115.6 ns/op	     328 B/op	       8 allocs/op
+BenchmarkMask_DirtyString-10          	10174621	       115.7 ns/op	     328 B/op	       8 allocs/op
+BenchmarkMask_DirtyString-10          	10423844	       115.5 ns/op	     328 B/op	       8 allocs/op
+BenchmarkMask_DirtyString-10          	10308904	       116.9 ns/op	     328 B/op	       8 allocs/op
+BenchmarkPipeline_FullInference-10    	    1012	   1211413 ns/op	    5706 B/op	      45 allocs/op
+BenchmarkPipeline_FullInference-10    	     997	   1202823 ns/op	    6734 B/op	      45 allocs/op
+BenchmarkPipeline_FullInference-10    	    1005	   1206047 ns/op	    7688 B/op	      45 allocs/op
+BenchmarkPipeline_FullInference-10    	     999	   1193800 ns/op	    9687 B/op	      45 allocs/op
+BenchmarkPipeline_FullInference-10    	     990	   1195097 ns/op	   12741 B/op	      45 allocs/op
+PASS
+ok  	github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor	22.211s

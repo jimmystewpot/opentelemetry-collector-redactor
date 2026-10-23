@@ -1,0 +1,60 @@
+version: "2"
+run:
+  tests: true
+  allow-parallel-runners: true
+linters:
+  enable:
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - noctx
+    - prealloc
+    - unconvert
+  settings:
+    gocritic:
+      disabled-checks:
+        - whyNoLint
+        - unnamedResult
+        - dupImport
+        - dupSubExpr
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    gosec:
+      excludes:
+        - G101
+        - G103
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+      enable-all: true
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: false
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - gosec
+        path: .*_test\.go
+      - linters:
+          - gosec
+        text: G101
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

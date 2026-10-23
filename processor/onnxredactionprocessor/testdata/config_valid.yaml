@@ -1,0 +1,26 @@
+model:
+  path: /etc/otel/models/pii_ner_int8.onnx
+  sha256: "7ef06dbfe51de3cd4cb08c2075a390b21ad261b28e7c7f9e36e6e66d2d7329a8"
+  tokenizer_path: /etc/otel/models/tokenizer.json
+  tokenizer_sha256: ""
+  session:
+    intra_op_threads: 2
+    concurrent_runs: 2
+    allow_spinning: false
+inference:
+  coalesce_window: 2ms
+  coalesce_max_strings: 64
+  max_tensor_batch_size: 32
+  length_buckets: [32, 128, 256]
+  window_tokens: 256
+  window_overlap_tokens: 32
+  max_payload_bytes: 16384
+  confidence_threshold: 0.85
+  timeout: 25ms
+  warmup_on_start: true
+entities: [PERSON, EMAIL, PHONE, LOCATION, CREDIT_CARD, SSN, IBAN, MEDICAL_ID, PATH_USER]
+filtering:
+  min_string_length: 4
+  exclude_attributes: ["service.name", "service.version", "host.*", "k8s.*", "container.*", "telemetry.sdk.*", "os.*"]
+on_error: drop
+dry_run: false

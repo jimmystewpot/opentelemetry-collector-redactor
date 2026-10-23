@@ -1,0 +1,19 @@
+dist:
+  name: otelcol-onnxredactor
+  description: "OpenTelemetry Collector distribution with in-process ONNX NER PII Redactor"
+  output_path: ./bin
+  version: 0.1.0
+  cgo_enabled: true
+
+processors:
+  - gomod: github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor v0.1.0
+    path: ./processor/onnxredactionprocessor
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.163.0
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.163.0
+
+receivers:
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.163.0
+
+exporters:
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.163.0
+  - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.163.0
