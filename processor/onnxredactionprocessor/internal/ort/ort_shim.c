@@ -260,17 +260,36 @@ int ort_shim_run_batch(
 
     size_t num_dims = 0;
     st = g_ort->GetDimensionsCount(shape_info, &num_dims);
-    if (st) g_ort->ReleaseStatus(st);
+    if (st) {
+        if (out_err) *out_err = strdup(g_ort->GetErrorMessage(st));
+        g_ort->ReleaseStatus(st);
+        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        g_ort->ReleaseValue(out_tensors[0]);
+        return -1;
+    }
+
     int64_t dims[3] = {0};
-    if (num_dims > 3) num_dims = 3;
-    st = g_ort->GetDimensions(shape_info, dims, num_dims);
-    if (st) g_ort->ReleaseStatus(st);
+    if (num_dims == 3) {
+        st = g_ort->GetDimensions(shape_info, dims, 3);
+        if (st) {
+            if (out_err) *out_err = strdup(g_ort->GetErrorMessage(st));
+            g_ort->ReleaseStatus(st);
+            g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+            g_ort->ReleaseValue(out_tensors[0]);
+            return -1;
+        }
+    }
+
+    if (num_dims != 3 || dims[0] != batch_size || dims[1] != seq_len || dims[2] <= 0) {
+        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        g_ort->ReleaseValue(out_tensors[0]);
+        if (out_err) *out_err = strdup("ort_shim: unexpected output tensor dimensions");
+        return -1;
+    }
+
     g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
 
-    int64_t num_classes = 19;
-    if (num_dims >= 3) {
-        num_classes = dims[2];
-    }
+    int64_t num_classes = dims[2];
     if (out_num_classes) {
         *out_num_classes = num_classes;
     }
