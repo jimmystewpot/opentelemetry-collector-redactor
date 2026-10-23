@@ -245,6 +245,11 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 						target.SetMax(dp.Max())
 					}
 				}
+				target.SetZeroCount(target.ZeroCount() + dp.ZeroCount())
+				if target.Scale() == dp.Scale() {
+					mergeExpBuckets(target.Positive(), dp.Positive())
+					mergeExpBuckets(target.Negative(), dp.Negative())
+				}
 				stats.record(pmetric.MetricTypeExponentialHistogram)
 			} else {
 				indices[k] = merged.Len()
@@ -259,4 +264,49 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 	}
 
 	return stats
+}
+
+func mergeExpBuckets(dst, src pmetric.ExponentialHistogramDataPointBuckets) {
+	srcLen := src.BucketCounts().Len()
+	if srcLen == 0 {
+		return
+	}
+	dstLen := dst.BucketCounts().Len()
+	if dstLen == 0 {
+		dst.SetOffset(src.Offset())
+		dst.BucketCounts().FromRaw(append([]uint64(nil), src.BucketCounts().AsRaw()...))
+		return
+	}
+
+	dstOffset := dst.Offset()
+	srcOffset := src.Offset()
+	minOffset := dstOffset
+	if srcOffset < minOffset {
+		minOffset = srcOffset
+	}
+
+	dstEnd := int(dstOffset) + dstLen
+	srcEnd := int(srcOffset) + srcLen
+	maxEnd := dstEnd
+	if srcEnd > maxEnd {
+		maxEnd = srcEnd
+	}
+
+	newLen := maxEnd - int(minOffset)
+	newCounts := make([]uint64, newLen)
+
+	dstRaw := dst.BucketCounts().AsRaw()
+	dstBase := int(dstOffset) - int(minOffset)
+	for i := 0; i < dstLen; i++ {
+		newCounts[dstBase+i] += dstRaw[i]
+	}
+
+	srcRaw := src.BucketCounts().AsRaw()
+	srcBase := int(srcOffset) - int(minOffset)
+	for i := 0; i < srcLen; i++ {
+		newCounts[srcBase+i] += srcRaw[i]
+	}
+
+	dst.SetOffset(minOffset)
+	dst.BucketCounts().FromRaw(newCounts)
 }
