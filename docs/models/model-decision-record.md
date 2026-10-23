@@ -42,7 +42,7 @@ Unlike standard NER models which either ignore paths or mask entire file system 
 
 Three candidate transformer backbones were evaluated for latency, memory footprint, and edge feasibility on ARM64 (`linux/arm64` AWS Graviton 2/3 and `darwin/arm64` Apple Silicon):
 
-| Model Candidate | Parameters | FP32 Size | INT8 Size | Inference Latency (seq=32, batch=1) | Throughput (strings/s/core) | License | Verdict |
+| Model Candidate | Parameters | FP32 Size | INT8 Size | Inference Latency (seq=32, batch=1) | Throughput (strings/s/core) | Licence | Verdict |
 |---|---|---|---|---|---|---|---|
 | **BERT-Base NER** (`dslim/bert-base-NER`) | 110M | 433 MB | 109 MB | 18.2 ms | ~55 s/core | Apache 2.0 | Reference baseline; too heavy for edge collector |
 | **RoBERTa-NER** (`FacebookAI/roberta-base`) | 125M | 498 MB | 124 MB | 21.4 ms | ~47 s/core | MIT | High precision, excessive memory overhead |
@@ -52,8 +52,8 @@ Three candidate transformer backbones were evaluated for latency, memory footpri
 - **Layers:** 6 transformer encoder layers
 - **Hidden Dimension:** 384
 - **Attention Heads:** 12
-- **Quantization:** INT8 Dynamic Quantization (`QuantType.QInt8` for Linear/MatMul layers).
-- **License:** Apache 2.0 (fully commercial and enterprise compliant).
+- **Quantisation:** INT8 Dynamic Quantisation (`QuantType.QInt8` for Linear/MatMul layers).
+- **Licence:** Apache 2.0 (fully commercial and enterprise compliant).
 - **Memory Footprint:** 22.8 MB model weights + ~12 MB ORT runtime heap per thread pool.
 
 ---
@@ -74,13 +74,13 @@ To satisfy the 9-class taxonomy and `PATH_USER` requirement:
 
 ---
 
-## 5. Artifact Verification & Checksums
+## 5. Artefact Verification & Checksums
 
 Synthetic test models generated for unit tests and CI:
 - `testdata/tiny_ner.onnx`: Gather-based deterministic tensor emulator.
   - Input: `input_ids: int64[B,S]`, `attention_mask: int64[B,S]`
   - Output: `logits: float32[B,S,19]`
 - `testdata/slow_loop.onnx`: Iterative Loop operator for cancellation verification (`RunOptionsSetTerminate`).
-- `testdata/tokenizer.json`: HuggingFace WordPiece tokenizer definition.
+- `testdata/tokenizer.json`: HuggingFace WordPiece tokeniser definition.
 
 Recorded in `processor/onnxredactionprocessor/testdata/checksums.txt`.
