@@ -32,7 +32,7 @@ ORT_ARCHIVE = onnxruntime-$(ORT_OS)-$(ORT_ARCH)-$(ORT_VERSION).tgz
 ORT_URL = https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/$(ORT_ARCHIVE)
 
 CGO_CFLAGS ?= -I$(ORT_DIR)/include
-CGO_LDFLAGS ?= -L$(ORT_DIR)/lib -lonnxruntime -rpath $(ORT_DIR)/lib
+CGO_LDFLAGS ?= -L$(ORT_DIR)/lib -lonnxruntime -Wl,-rpath,$(ORT_DIR)/lib
 
 export CGO_CFLAGS
 export CGO_LDFLAGS
