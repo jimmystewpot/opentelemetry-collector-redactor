@@ -26,6 +26,7 @@ type telemetry struct {
 	queueWait        metric.Float64Histogram
 	metricCollisions metric.Int64Counter
 	metricLabelPII   metric.Int64Counter
+	reg              metric.Registration
 }
 
 func newTelemetry(set *component.TelemetrySettings, ortVersion, modelSHA, kernelPath string) (*telemetry, error) {
@@ -163,8 +164,10 @@ func newTelemetry(set *component.TelemetrySettings, ortVersion, modelSHA, kernel
 		metric.WithDescription("Static engine and model build metadata"),
 		metric.WithUnit("1"),
 	)
+	var reg metric.Registration
 	if err == nil {
-		_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		var regErr error
+		reg, regErr = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 			o.ObserveInt64(engineInfo, 1, metric.WithAttributes(
 				attribute.String("ort_version", ortVersion),
 				attribute.String("model_sha", modelSHA),
@@ -172,6 +175,9 @@ func newTelemetry(set *component.TelemetrySettings, ortVersion, modelSHA, kernel
 			))
 			return nil
 		}, engineInfo)
+		if regErr != nil {
+			return nil, regErr
+		}
 	}
 
 	return &telemetry{
@@ -189,7 +195,16 @@ func newTelemetry(set *component.TelemetrySettings, ortVersion, modelSHA, kernel
 		queueWait:        queueWait,
 		metricCollisions: metricCollisions,
 		metricLabelPII:   metricLabelPII,
+		reg:              reg,
 	}, nil
+}
+
+// Close unregisters the metric callback registration.
+func (t *telemetry) Close() error {
+	if t == nil || t.reg == nil {
+		return nil
+	}
+	return t.reg.Unregister()
 }
 
 func (t *telemetry) RecordBatch(coalescedStrings int) {

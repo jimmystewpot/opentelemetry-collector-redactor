@@ -429,6 +429,7 @@ func TestProcessor_TelemetryHelpers(t *testing.T) {
 	tel.RecordInflight(1)
 	tel.RecordInflight(-1)
 	tel.RecordQueueWait(5 * time.Millisecond)
+	assert.NoError(t, tel.Close())
 
 	// Nil receiver safe
 	var nilTel *telemetry
@@ -445,6 +446,7 @@ func TestProcessor_TelemetryHelpers(t *testing.T) {
 	nilTel.RecordMetricCollision("Sum", 1)
 	nilTel.RecordInflight(1)
 	nilTel.RecordQueueWait(time.Millisecond)
+	assert.NoError(t, nilTel.Close())
 }
 
 type errWarmupDetector struct {

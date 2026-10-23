@@ -9,6 +9,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/arena"
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/bucket"
@@ -710,3 +713,125 @@ func (bd *blockingDetector) DetectBatch(ctx context.Context, batch types.Buckete
 }
 func (bd *blockingDetector) Warmup(ctx context.Context) error { return nil }
 func (bd *blockingDetector) Close() error                     { return nil }
+
+func TestCoalescer_AllowedLabelsFiltering(t *testing.T) {
+	pool := arena.NewPool(16, 32, 19)
+	tok := &dummyTokenizer{}
+	chunker := window.NewChunker(32, 4, 16384)
+	bucketer := bucket.New([]int{32}, 16)
+	fakeDet := detect.NewFakeDetector()
+	fakeDet.SpansToReturn = [][]types.EntitySpan{
+		{
+			{Start: 0, End: 5, Label: types.LabelPerson, Confidence: 0.99},
+			{Start: 6, End: 23, Label: types.LabelEmail, Confidence: 0.99},
+		},
+	}
+
+	var allowed [10]bool
+	allowed[types.LabelEmail] = true // Only EMAIL enabled; PERSON disabled
+
+	c := New(5*time.Millisecond, 1, nil, tok, chunker, bucketer, fakeDet, pool, 16384, types.ErrorModeDrop, false, WithAllowedLabels(allowed))
+	defer func() { _ = c.Close() }()
+
+	val := pcommon.NewValueStr("Alice alice@example.com")
+	err := c.Submit(context.Background(), []Item{{Signal: "logs", Text: val.Str(), Target: dedup.MutationTarget{Kind: dedup.TargetPCommonValue, Val: val, Signal: "logs"}}})
+	assert.NoError(t, err)
+	assert.Equal(t, "Alice [REDACTED_EMAIL]", val.Str())
+}
+
+type scrubRecorder struct {
+	noopTelemetry
+	mu       sync.Mutex
+	scrubbed []struct{ signal, reason string }
+}
+
+func (s *scrubRecorder) RecordScrubbed(signal, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scrubbed = append(s.scrubbed, struct{ signal, reason string }{signal, reason})
+}
+
+func TestCoalescer_ScrubbedSignalAttribution(t *testing.T) {
+	pool := arena.NewPool(16, 32, 19)
+	rec := &scrubRecorder{}
+
+	// Case 1: Tokenizer error under ErrorModeDrop
+	t.Run("tokenizer_error", func(t *testing.T) {
+		chunker := window.NewChunker(32, 4, 16384)
+		bucketer := bucket.New([]int{32}, 16)
+		fakeDet := detect.NewFakeDetector()
+		c := New(5*time.Millisecond, 1, nil, &errTokenizer{}, chunker, bucketer, fakeDet, pool, 16384, types.ErrorModeDrop, false, WithTelemetry(rec))
+		defer func() { _ = c.Close() }()
+
+		val := pcommon.NewValueStr("some text")
+		err := c.Submit(context.Background(), []Item{{Signal: "traces", Text: val.Str(), Target: dedup.MutationTarget{Kind: dedup.TargetPCommonValue, Val: val, Signal: "traces"}}})
+		assert.NoError(t, err)
+		assert.Equal(t, types.RedactedUninspected, val.Str())
+
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		assert.Contains(t, rec.scrubbed, struct{ signal, reason string }{"traces", "tokenizer_error"})
+	})
+
+	// Case 2: Oversize tail under ErrorModeDrop
+	t.Run("oversize_tail", func(t *testing.T) {
+		chunker := window.NewChunker(10, 2, 10) // maxChars = 10
+		bucketer := bucket.New([]int{32}, 16)
+		fakeDet := detect.NewFakeDetector()
+		c := New(5*time.Millisecond, 1, nil, &dummyTokenizer{}, chunker, bucketer, fakeDet, pool, 16384, types.ErrorModeDrop, false, WithTelemetry(rec))
+		defer func() { _ = c.Close() }()
+
+		val := pcommon.NewValueStr("0123456789oversize_tail_data")
+		err := c.Submit(context.Background(), []Item{{Signal: "logs", Text: val.Str(), Target: dedup.MutationTarget{Kind: dedup.TargetPCommonValue, Val: val, Signal: "logs"}}})
+		assert.NoError(t, err)
+
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		assert.Contains(t, rec.scrubbed, struct{ signal, reason string }{"logs", "oversize_tail"})
+	})
+
+	// Case 3: Mask error under ErrorModeDrop
+	t.Run("mask_error", func(t *testing.T) {
+		chunker := window.NewChunker(32, 4, 16384)
+		bucketer := bucket.New([]int{32}, 16)
+		fakeDet := detect.NewFakeDetector()
+		fakeDet.SpansToReturn = [][]types.EntitySpan{
+			{
+				{Start: 50, End: 100, Label: types.LabelEmail, Confidence: 0.99}, // out of bounds
+			},
+		}
+		c := New(5*time.Millisecond, 1, nil, &dummyTokenizer{}, chunker, bucketer, fakeDet, pool, 16384, types.ErrorModeDrop, false, WithTelemetry(rec))
+		defer func() { _ = c.Close() }()
+
+		val := pcommon.NewValueStr("short")
+		err := c.Submit(context.Background(), []Item{{Signal: "metrics", Text: val.Str(), Target: dedup.MutationTarget{Kind: dedup.TargetPCommonValue, Val: val, Signal: "metrics"}}})
+		assert.NoError(t, err)
+		assert.Equal(t, types.RedactedUninspected, val.Str())
+
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		assert.Contains(t, rec.scrubbed, struct{ signal, reason string }{"metrics", "mask_error"})
+	})
+}
+
+func TestCoalescer_StructuredPanicLogging(t *testing.T) {
+	pool := arena.NewPool(16, 32, 19)
+	tok := &dummyTokenizer{}
+	chunker := window.NewChunker(32, 4, 16384)
+	bucketer := bucket.New([]int{32}, 16)
+
+	core, observedLogs := observer.New(zapcore.ErrorLevel)
+	logger := zap.New(core)
+
+	c := New(5*time.Millisecond, 1, nil, tok, chunker, bucketer, &panicDetector{}, pool, 16384, types.ErrorModeDrop, false, WithLogger(logger))
+	defer func() { _ = c.Close() }()
+
+	val := pcommon.NewValueStr("test panic")
+	err := c.Submit(context.Background(), []Item{{Signal: "logs", Text: val.Str(), Target: dedup.MutationTarget{Kind: dedup.TargetPCommonValue, Val: val, Signal: "logs"}}})
+	assert.ErrorContains(t, err, "redaction batch panic")
+
+	logs := observedLogs.FilterMessage("redaction batch panic recovered").All()
+	assert.Len(t, logs, 1)
+	assert.Equal(t, zapcore.ErrorLevel, logs[0].Level)
+}
+
