@@ -39,7 +39,10 @@ US_TO_AU_MAP = {
     r"\bflavor(s)?\b": "flavour\\1",
     
     # -er -> -re
-    r"\bcenter(s|ed|ing)?\b": "centre\\1",
+    r"\bcenter\b": "centre",
+    r"\bcenters\b": "centres",
+    r"\bcentered\b": "centred",
+    r"\bcentering\b": "centring",
     
     # artifact -> artefact
     r"\bartifact(s)?\b": "artefact\\1",

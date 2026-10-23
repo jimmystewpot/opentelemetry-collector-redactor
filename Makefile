@@ -37,14 +37,17 @@ CGO_LDFLAGS ?= -L$(ORT_DIR)/lib -lonnxruntime -Wl,-rpath,$(ORT_DIR)/lib
 export CGO_CFLAGS
 export CGO_LDFLAGS
 
-.PHONY: all fmt lint test bench clean download-ort download-ort-linux-amd64 download-ort-linux-arm64 download-ort-darwin-arm64 download-ort-darwin-amd64 print-env
+.PHONY: all fmt lint test bench clean download-ort download-ort-linux-amd64 download-ort-linux-arm64 download-ort-darwin-arm64 download-ort-darwin-amd64 print-env validate-spelling
 
 all: fmt lint test
 
 fmt:
 	@cd processor/onnxredactionprocessor && $(GO) fmt ./...
 
-lint:
+validate-spelling:
+	@python3 scripts/validate_australian_english.py docs/ README.md
+
+lint: validate-spelling
 	@cd processor/onnxredactionprocessor && $(GOLANGCI_LINT) run ./...
 
 test:

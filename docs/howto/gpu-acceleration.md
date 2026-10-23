@@ -66,7 +66,9 @@ To register the CUDA execution provider in `ort_shim.c`, use the official ONNX R
 
 ```c
 #include <onnxruntime_c_api.h>
-#include <cuda_provider_factory.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 int ort_shim_enable_cuda(OrtSessionOptions* opts, int device_id, char** out_err) {
     OrtCUDAProviderOptionsV2* cuda_opts = NULL;
@@ -80,10 +82,28 @@ int ort_shim_enable_cuda(OrtSessionOptions* opts, int device_id, char** out_err)
     // Configure dedicated GPU VRAM memory arena ceiling (2 GiB)
     char device_str[16];
     snprintf(device_str, sizeof(device_str), "%d", device_id);
-    g_ort->CUDAProviderOptionsV2SetKeyValue(cuda_opts, "device_id", device_str);
-    g_ort->CUDAProviderOptionsV2SetKeyValue(cuda_opts, "arena_extend_strategy", "kSameAsRequested");
-    g_ort->CUDAProviderOptionsV2SetKeyValue(cuda_opts, "gpu_mem_limit", "2147483648");
-    g_ort->CUDAProviderOptionsV2SetKeyValue(cuda_opts, "cudnn_conv_algo_search", "DEFAULT");
+
+    const char* keys[] = {
+        "device_id",
+        "arena_extend_strategy",
+        "gpu_mem_limit",
+        "cudnn_conv_algo_search"
+    };
+    const char* values[] = {
+        device_str,
+        "kSameAsRequested",
+        "2147483648", // 2 GiB VRAM limit
+        "DEFAULT"
+    };
+    size_t num_keys = sizeof(keys) / sizeof(keys[0]);
+
+    st = g_ort->UpdateCUDAProviderOptions(cuda_opts, keys, values, num_keys);
+    if (st) {
+        if (out_err) *out_err = strdup(g_ort->GetErrorMessage(st));
+        g_ort->ReleaseStatus(st);
+        g_ort->ReleaseCUDAProviderOptions(cuda_opts);
+        return -1;
+    }
 
     st = g_ort->SessionOptionsAppendExecutionProvider_CUDA_V2(opts, cuda_opts);
     g_ort->ReleaseCUDAProviderOptions(cuda_opts);
