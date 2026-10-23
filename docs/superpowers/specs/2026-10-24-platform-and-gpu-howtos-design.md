@@ -172,7 +172,7 @@ This guide addresses dual deployment architectures for GPU acceleration:
     - GPU instance group allocation (`kind: KIND_GPU, count: 2`).
 - **Comprehensive Trade-Off Analysis:**
   - Thorough evaluation comparing local SIMD CPU (~1.18 ms latency, 0 network overhead) against Remote Triton (~2.50 ms latency with network hop, but amortised throughput of 150k+ strings/sec across enterprise clusters).
-  - Network overhead, serialization, MTU sizing, and gRPC keepalive tuning.
+  - Network overhead, serialisation, MTU sizing, and gRPC keepalive tuning.
 
 ---
 

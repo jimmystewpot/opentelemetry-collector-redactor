@@ -14,7 +14,7 @@ The processor executes machine-learning inference directly within the OpenTeleme
 ## Key Features & Architecture
 
 * **Zero-Allocation Hot Path:** Operates at **5.4 ns/op with 0 B/op and 0 allocs/op** on clean telemetry strings. All intermediate buffers, token slices, window descriptions, and tensors are recycled through pre-allocated arena pools ([`arena.Pool`](file:///Users/jlamb/go/src/github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/arena/arena.go)).
-* **Single Shared ONNX Engine Across Signals:** A thread-safe, reference-counted component registry shares a single underlying ONNX Runtime session, memory arena, tokenizer, and coalescing queue across Logs, Traces, and Metrics pipelines, eliminating redundant memory duplication and preserving container memory ceilings (< 200 MB RSS).
+* **Single Shared ONNX Engine Across Signals:** A thread-safe, reference-counted component registry shares a single underlying ONNX Runtime session, memory arena, tokeniser, and coalescing queue across Logs, Traces, and Metrics pipelines, eliminating redundant memory duplication and preserving container memory ceilings (< 200 MB RSS).
 * **Fine-Grained User Path Redaction (`PATH_USER`):** Intelligently isolates and redacts **only the user segment** in file system paths (e.g. `/home/alice/.ssh/id_rsa` becomes `/home/[REDACTED_PATH_USER]/.ssh/id_rsa`, and `C:\Users\admin\app.log` becomes `C:\Users\[REDACTED_PATH_USER]\app.log`), preserving critical operating system and application directory structures for stack traces.
 * **Pure NER with Zero Regex Fallbacks:** Enforces semantic machine-learning classification without brittle pattern lists.
 * **CGo Concurrency & Cancellation Isolation:** Independent `OrtRunOptions` instances are pooled per concurrent execution slot. When an upstream request times out or is cancelled, cooperative termination halts native execution immediately without interfering with parallel in-flight batches.
@@ -280,7 +280,13 @@ The processor exports granular OpenTelemetry metrics on port `:8888`:
 
 ## Further Reading
 
-* For detailed operational instructions, fine-tuning guides, model export scripts, and deployment runbooks, see the [How-To Guide](docs/howto.md).
+* For executive instructions, deployment runbooks, and pipeline configuration, see the [How-To Guide](docs/howto.md).
+* For platform-specific runbooks and hardware acceleration architectures:
+  * [Platform Decision Matrix & Hardware Selection](docs/howto/README.md)
+  * [macOS Deployment Guide](docs/howto/macos.md) (Apple Silicon ARM64 & Intel x86_64)
+  * [Linux x86_64 Production Guide](docs/howto/linux-x86_64.md) (AVX2/AVX-512, systemd, glibc)
+  * [Linux ARM64 Production Guide](docs/howto/linux-arm64.md) (AWS Graviton, Ampere Altra, NEON)
+  * [GPU Acceleration & Server Integration Guide](docs/howto/gpu-acceleration.md) (CUDA, ROCm, and Triton)
 * For model taxonomy details and benchmark results, see the [Model Decision Record](docs/models/model-decision-record.md).
 
 ---

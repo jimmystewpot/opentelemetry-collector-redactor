@@ -6,6 +6,18 @@ All conventions and terminology in this document follow Australian English spell
 
 ---
 
+## Dedicated Platform & GPU Guides
+
+For detailed operating system, hardware vectorisation, and GPU server acceleration runbooks, see the dedicated modular guides:
+
+- **[Platform Decision Matrix & Landing Guide](howto/README.md)**: Architectural comparison, throughput thresholds, and hardware selection.
+- **[macOS Deployment Guide](howto/macos.md)**: Apple Silicon (`arm64`) & Intel (`x86_64`), `@rpath`, SIP, and local `ocb` development.
+- **[Linux x86_64 Production Guide](howto/linux-x86_64.md)**: AVX2/AVX-512 VNNI, `glibc` vs `musl` ABI, and hardened `systemd` service unit.
+- **[Linux ARM64 Production Guide](howto/linux-arm64.md)**: AWS Graviton 2/3/4, Ampere Altra, ARM NEON/I8MM, Docker Buildx, and NUMA tuning.
+- **[GPU Acceleration & Server Integration Guide](howto/gpu-acceleration.md)**: In-process CUDA/ROCm execution providers and distributed remote Triton Inference Server offloading.
+
+---
+
 ## Table of Contents
 
 1. [Local Development & Environment Setup](#1-local-development--environment-setup)
@@ -188,7 +200,7 @@ otlp receiver ──▶ memory_limiter ──▶ onnxredaction ──▶ batch �
 ```
 
 * **`memory_limiter` first:** Ensures sudden traffic spikes trigger backpressure before memory is allocated for string extraction or tokenisation.
-* **`onnxredaction` before `batch`:** Performs in-place masking and metric collision merging prior to outbound batching. This ensures colliding metric series resulting from redacted labels are merged before exporter serialization.
+* **`onnxredaction` before `batch`:** Performs in-place masking and metric collision merging prior to outbound batching. This ensures colliding metric series resulting from redacted labels are merged before exporter serialisation.
 
 ### Sample Production Configuration
 
