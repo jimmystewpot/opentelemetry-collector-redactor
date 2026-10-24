@@ -1,10 +1,14 @@
 # Gatekeeper Review Round 2 Remediation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:dispatching-parallel-agents and superpowers:subagent-driven-development to implement Tasks 1–4 concurrently across strictly disjoint packages, followed by superpowers:test-driven-development (Red-Green-Refactor) within each subagent. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Remediate all validated P0, P1, P2, and documentation findings from the Round 2 static analysis and memory safety audit using test-driven development.
+**Goal:** Remediate all validated P0, P1, P2, and documentation findings from the Round 2 static analysis and memory safety audit using test-driven development and parallel subagents.
 
-**Architecture:** Harden span escape widening and post-widening overlap clamping in `internal/mask`; enforce CGo `FLOAT` tensor element type verification, `runtime.KeepAlive`, and decoder class bounds in `internal/ort`, `internal/decode`, and `internal/tokenizer`; bound pooled slice growth, eliminate redundant batch slice allocations, clean up failed initialisation registrations, and harden metric collision merging across `internal/arena`, `internal/coalesce`, `internal/metricsmerge`, `processor.go`, and `README.md`.
+**Architecture:** Partition the 8 validated findings into 4 strictly disjoint, zero-shared-file parallel subagent tracks with unchanged cross-package signatures:
+- **Track A (Task 1 — `internal/mask`):** Post-widening span overlap clamping and hex-validated `\uXXXX` JSON escapes.
+- **Track B (Task 2 — `internal/ort`, `internal/decode`):** CGo `FLOAT` output tensor element type validation, slice reslicing, `runtime.KeepAlive`, and decoder class bounds checking.
+- **Track C (Task 3 — `internal/tokenizer`, `internal/metricsmerge`):** Slow-path multi-byte UTF-8 rune offset mapping, length-prefixed canonical attribute hashing, and explicit histogram bounds validation.
+- **Track D (Task 4 — `internal/arena`, `internal/coalesce`, `processor.go`, `README.md`):** Active-slice arena zeroing with `4x` retention caps, coalescer in-place span merging, processor init error cleanup / tokeniser shutdown, and `README.md` metric documentation.
 
 **Tech Stack:** Go 1.27, CGo (`onnxruntime_c_api.h` v1.31.0), OpenTelemetry Collector `pdata` v0.163.0, `stretchr/testify`.
 
@@ -15,6 +19,16 @@
 - All code must compile and pass `go test -race -count=1 ./...` (`make test`) and `golangci-lint run ./...` (`make lint`).
 - All Markdown files must pass `python3 scripts/validate_australian_english.py docs/ README.md` (`make validate-spelling`).
 - Existing test contracts (`TestMask_BoundsAndOverlapErrors`, `TestPool_ZeroingOnRelease`, `TestCoalescer_SemaphoreFull`, `TestProcessor_LogBodyTypes`) must remain green.
+- Parallel subagents must modify **only** the files listed in their assigned task and must **not** run `git commit` concurrently (preventing `.git/index.lock` races); the coordinator commits each track atomically after parallel completion and review.
+
+## Parallel Subagent Topology & File Isolation Matrix
+
+| Parallel Track | Task | Owned Packages | Owned Files | Cross-Track File Overlap | Signature Drift |
+| :--- | :--- | :--- | :--- | :---: | :---: |
+| **Track A** | Task 1 | `./internal/mask` | `internal/mask/mask.go`, `internal/mask/mask_test.go` | None | None |
+| **Track B** | Task 2 | `./internal/ort`, `./internal/decode` | `internal/ort/ort_shim.c`, `internal/ort/engine.go`, `internal/ort/engine_test.go`, `internal/decode/decode.go`, `internal/decode/decode_test.go` | None | None |
+| **Track C** | Task 3 | `./internal/tokenizer`, `./internal/metricsmerge` | `internal/tokenizer/tokenizer.go`, `internal/tokenizer/tokenizer_test.go`, `internal/metricsmerge/merge.go`, `internal/metricsmerge/merge_test.go` | None | None |
+| **Track D** | Task 4 | `./internal/arena`, `./internal/coalesce`, root `onnxredactionprocessor` | `internal/arena/arena.go`, `internal/arena/arena_test.go`, `internal/coalesce/coalesce.go`, `processor.go`, `processor_test.go`, `README.md` | None | None |
 
 ## Review Focus
 
@@ -26,7 +40,7 @@
 
 ---
 
-### Task 1: Span Masking Post-Widening Overlap Clamping & Hex-Validated `\uXXXX` Escapes (`internal/mask`)
+### Task 1 (Parallel Track A): Span Masking Post-Widening Overlap Clamping & Hex-Validated `\uXXXX` Escapes (`internal/mask`)
 
 **Files:**
 - Modify: `processor/onnxredactionprocessor/internal/mask/mask.go:69-108,162-211`
@@ -36,7 +50,7 @@
 - Consumes: `types.EntitySpan`, `types.ErrorMode`
 - Produces: `mask.Mask(text string, spans []types.EntitySpan, maxPayloadBytes int, mode types.ErrorMode, scratch []byte) (string, error)` (unchanged signature)
 
-- [ ] **Step 1: Write failing tests in `processor/onnxredactionprocessor/internal/mask/mask_test.go`**
+- [ ] **Step 1: Write the failing test in `processor/onnxredactionprocessor/internal/mask/mask_test.go`**
 
 Add `TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths` to `processor/onnxredactionprocessor/internal/mask/mask_test.go`:
 
@@ -62,8 +76,7 @@ func TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths(t *testing.T) {
 	// 3. Escaped backslash before u0041 (\\u0041 is literal \ followed by u0041, not a unicode escape)
 	escapedBackslash := `C:\\u0041\alice`
 	sEsc := spanOf(escapedBackslash, "u0041", types.LabelPathUser)
-	// Start at '0' (inside u0041) to verify \\u0041 is not widened across the escaped backslash
-	sEsc.Start++
+	sEsc.Start++ // Start at '0' (inside u0041) to verify \\u0041 is not widened across the escaped backslash
 	outEsc, err := Mask(escapedBackslash, []types.EntitySpan{sEsc}, 16384, types.ErrorModeDrop, nil)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(outEsc, `C:\\u`), "escaped backslash must not be treated as \\uXXXX: %s", outEsc)
@@ -79,15 +92,15 @@ Expected: FAIL (`mask: overlapping spans detected` on `jsonAdj` and corrupted `C
 
 1. In `Mask` (`mask.go:69-108`), track `rawLastEnd := 0` and `lastEnd := 0`:
    - Before `if s.Start >= inspectLimit`, check `if s.Start < rawLastEnd { return "", fmt.Errorf("mask: overlapping spans detected at offset %d", s.Start) }` and set `rawLastEnd = s.End`.
-   - After `widenJSONEscapes` and `if end > inspectLimit`, clamp `if start < lastEnd { start = lastEnd }` and `if start >= end { continue }`.
+   - After `widenJSONEscapes` and `if end > inspectLimit`, clamp `if start < lastEnd { start = lastEnd }` and skip empty spans (`if start >= end { continue }`).
 2. In `widenJSONEscapes` (`mask.go:162-211`), add `isHexDigit(b byte) bool` and `isValidUnicodeEscape(text string, idx int) bool` (verifying `idx >= 0 && idx+6 <= len(text) && text[idx] == '\\' && text[idx+1] == 'u'`, an odd count of consecutive `\` ending at `idx`, and 4 hex digits at `text[idx+2:idx+6]`), and use `isValidUnicodeEscape(text, idx)` in steps 1 and 3 of `widenJSONEscapes`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Run package tests to verify they pass**
 
-Run: `cd processor/onnxredactionprocessor && go test -race -v ./internal/mask/...`
-Expected: PASS (all tests including `TestMask_BoundsAndOverlapErrors` and `TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths`).
+Run: `cd processor/onnxredactionprocessor && go test -race -count=1 -v ./internal/mask/...`
+Expected: PASS (including `TestMask_BoundsAndOverlapErrors` and `TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths`).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Stage and commit Track A changes (Coordinator)**
 
 ```bash
 git add processor/onnxredactionprocessor/internal/mask/mask.go processor/onnxredactionprocessor/internal/mask/mask_test.go
@@ -96,7 +109,7 @@ git commit -m "fix(mask): clamp post-widening span overlaps and validate hex in 
 
 ---
 
-### Task 2: CGo Output Tensor Element Type Validation, Slice Reslicing & Decoder/Tokeniser Bounds (`internal/ort`, `internal/decode`, `internal/tokenizer`)
+### Task 2 (Parallel Track B): CGo Output Tensor Element Type Validation, Slice Reslicing & Decoder Class Bounds (`internal/ort`, `internal/decode`)
 
 **Files:**
 - Modify: `processor/onnxredactionprocessor/internal/ort/ort_shim.c:43-56,160-317`
@@ -104,14 +117,12 @@ git commit -m "fix(mask): clamp post-widening span overlaps and validate hex in 
 - Modify: `processor/onnxredactionprocessor/internal/ort/engine_test.go`
 - Modify: `processor/onnxredactionprocessor/internal/decode/decode.go:106-135`
 - Modify: `processor/onnxredactionprocessor/internal/decode/decode_test.go`
-- Modify: `processor/onnxredactionprocessor/internal/tokenizer/tokenizer.go:319-379`
-- Modify: `processor/onnxredactionprocessor/internal/tokenizer/tokenizer_test.go`
 
 **Interfaces:**
 - Consumes: `arena.BatchArena`, `types.BucketedBatch`, `types.Offset`
-- Produces: Hardened `ort.Engine.DetectBatch`, `decode.Decoder.DecodeWindow`, and `wordPieceTokenizer.tokenizeWordSlow` with unchanged external signatures.
+- Produces: `(*ort.Engine).DetectBatch` and `(*decode.Decoder).DecodeWindow` with unchanged external signatures.
 
-- [ ] **Step 1: Write failing tests in `decode_test.go`, `engine_test.go`, and `tokenizer_test.go`**
+- [ ] **Step 1: Write failing tests in `decode_test.go` and `engine_test.go`**
 
 1. In `processor/onnxredactionprocessor/internal/decode/decode_test.go`, add `TestDecodeWindow_MoreClassesThanConfigured`:
 ```go
@@ -164,7 +175,72 @@ func TestEngine_ZeroLengthLogitsSliceAndZeroMaxSeqLen(t *testing.T) {
 	require.Len(t, spans, 1)
 }
 ```
-3. In `processor/onnxredactionprocessor/internal/tokenizer/tokenizer_test.go`, add `TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange`:
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd processor/onnxredactionprocessor && go test -v -run "TestDecodeWindow_MoreClassesThanConfigured|TestEngine_ZeroLengthLogitsSliceAndZeroMaxSeqLen" ./internal/decode ./internal/ort`
+Expected: FAIL (panics in `decode.go:106` and `engine.go:264/266`).
+
+- [ ] **Step 3: Implement fixes in `ort_shim.c`, `engine.go`, and `decode.go`**
+
+1. In `processor/onnxredactionprocessor/internal/ort/ort_shim.c`:
+   - In `ort_shim_create_session`, add `(void)concurrent_runs;`.
+   - In `ort_shim_run_batch`, reject `batch_size <= 0 || seq_len <= 0` at entry, and after `GetTensorTypeAndShape`, call `g_ort->GetTensorElementType(shape_info, &elem_type)` and verify `elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT`:
+```c
+    ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    st = g_ort->GetTensorElementType(shape_info, &elem_type);
+    if (st) {
+        if (out_err) *out_err = strdup(g_ort->GetErrorMessage(st));
+        g_ort->ReleaseStatus(st);
+        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        g_ort->ReleaseValue(out_tensors[0]);
+        return -1;
+    }
+    if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        g_ort->ReleaseValue(out_tensors[0]);
+        if (out_err) *out_err = strdup("ort_shim: unexpected output tensor element type (expected float32)");
+        return -1;
+    }
+```
+2. In `processor/onnxredactionprocessor/internal/ort/engine.go`:
+   - Import `"runtime"`.
+   - At the start of `DetectBatch`, return `nil, nil` if `len(batch.Windows) == 0 || batch.MaxSeqLen <= 0`.
+   - Check `cap(a.InputIDs) < totalElements || cap(a.AttentionMask) < totalElements || cap(a.Logits) == 0`.
+   - Reslice `a.Logits = a.Logits[:cap(a.Logits)]` before taking `logitsPtr := (*C.float)(unsafe.Pointer(&a.Logits[0]))`.
+   - Call `runtime.KeepAlive(a)` immediately after `C.ort_shim_run_batch(...)`.
+3. In `processor/onnxredactionprocessor/internal/decode/decode.go`:
+   - In `DecodeWindow`, guard `bestClass < len(d.classToLabel)` before indexing `d.classToLabel[bestClass]`, `d.isB[bestClass]`, and `d.isI[bestClass]`.
+
+- [ ] **Step 4: Run package tests to verify they pass**
+
+Run: `cd processor/onnxredactionprocessor && go test -race -count=1 -v ./internal/decode/... ./internal/ort/...`
+Expected: PASS.
+
+- [ ] **Step 5: Stage and commit Track B changes (Coordinator)**
+
+```bash
+git add processor/onnxredactionprocessor/internal/ort/ort_shim.c processor/onnxredactionprocessor/internal/ort/engine.go processor/onnxredactionprocessor/internal/ort/engine_test.go processor/onnxredactionprocessor/internal/decode/decode.go processor/onnxredactionprocessor/internal/decode/decode_test.go
+git commit -m "fix(ort,decode): validate float32 tensor element type, slice bounds, and decoder class index"
+```
+
+---
+
+### Task 3 (Parallel Track C): Slow-Path Multi-Byte Rune Offset Mapping & Metric Collision Bounds (`internal/tokenizer`, `internal/metricsmerge`)
+
+**Files:**
+- Modify: `processor/onnxredactionprocessor/internal/tokenizer/tokenizer.go:319-379`
+- Modify: `processor/onnxredactionprocessor/internal/tokenizer/tokenizer_test.go`
+- Modify: `processor/onnxredactionprocessor/internal/metricsmerge/merge.go:1-54,164-182,235-237`
+- Modify: `processor/onnxredactionprocessor/internal/metricsmerge/merge_test.go`
+
+**Interfaces:**
+- Consumes: `types.Offset`, `pcommon.Map`, `pmetric.Metric`
+- Produces: `(*wordPieceTokenizer).Encode`, `metricsmerge.ComputeCanonicalAttrHash`, `metricsmerge.ResolveCollisions` (unchanged signatures)
+
+- [ ] **Step 1: Write failing tests in `tokenizer_test.go` and `merge_test.go`**
+
+1. In `processor/onnxredactionprocessor/internal/tokenizer/tokenizer_test.go`, add `TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange`:
 ```go
 func TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange(t *testing.T) {
 	tok := &wordPieceTokenizer{
@@ -188,92 +264,6 @@ func TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange(t *testing.T) {
 	for _, off := range offsets {
 		assert.True(t, utf8.ValidString(text[off.Start:off.End]), "offset [%d:%d] must fall on valid UTF-8 rune boundaries", off.Start, off.End)
 	}
-}
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cd processor/onnxredactionprocessor && go test -v -run "TestDecodeWindow_MoreClassesThanConfigured|TestEngine_ZeroLengthLogitsSliceAndZeroMaxSeqLen|TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange" ./internal/decode ./internal/ort ./internal/tokenizer`
-Expected: FAIL (panics in `decode.go:106` and `engine.go:264/266`, and invalid UTF-8 offset in `tokenizer.go:366`).
-
-- [ ] **Step 3: Implement fixes in `ort_shim.c`, `engine.go`, `decode.go`, and `tokenizer.go`**
-
-1. In `processor/onnxredactionprocessor/internal/ort/ort_shim.c`:
-   - In `ort_shim_create_session`, add `(void)concurrent_runs;`.
-   - In `ort_shim_run_batch`, reject `batch_size <= 0 || seq_len <= 0` at entry, and after `GetTensorTypeAndShape`, call `g_ort->GetTensorElementType(shape_info, &elem_type)` and verify `elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT`.
-2. In `processor/onnxredactionprocessor/internal/ort/engine.go`:
-   - Import `"runtime"`.
-   - At the start of `DetectBatch`, return `nil, nil` if `len(batch.Windows) == 0 || batch.MaxSeqLen <= 0`.
-   - Check `cap(a.InputIDs) < totalElements || cap(a.AttentionMask) < totalElements || cap(a.Logits) == 0`.
-   - Reslice `a.Logits = a.Logits[:cap(a.Logits)]` before taking `logitsPtr := (*C.float)(unsafe.Pointer(&a.Logits[0]))`.
-   - Call `runtime.KeepAlive(a)` immediately after `C.ort_shim_run_batch(...)`.
-3. In `processor/onnxredactionprocessor/internal/decode/decode.go`:
-   - In `DecodeWindow`, guard `bestClass < len(d.classToLabel)` before indexing `d.classToLabel[bestClass]`, `d.isB[bestClass]`, and `d.isI[bestClass]`.
-4. In `processor/onnxredactionprocessor/internal/tokenizer/tokenizer.go`:
-   - In `tokenizeWordSlow`, build lowercased `word` rune-by-rune while recording `textOffsets []int` mapping each byte in `word` to its relative start byte in `text[wordStart:wordEnd]`, and use `wordStart + textOffsets[subStart]` / `wordStart + textOffsets[subEnd]` when appending `dstOffsets`.
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cd processor/onnxredactionprocessor && go test -race -v ./internal/decode/... ./internal/ort/... ./internal/tokenizer/...`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add processor/onnxredactionprocessor/internal/ort/ort_shim.c processor/onnxredactionprocessor/internal/ort/engine.go processor/onnxredactionprocessor/internal/ort/engine_test.go processor/onnxredactionprocessor/internal/decode/decode.go processor/onnxredactionprocessor/internal/decode/decode_test.go processor/onnxredactionprocessor/internal/tokenizer/tokenizer.go processor/onnxredactionprocessor/internal/tokenizer/tokenizer_test.go
-git commit -m "fix(ort,decode,tokenizer): validate float32 tensor type, slice bounds, and slow-path rune offsets"
-```
-
----
-
-### Task 3: Arena Retention Caps, Coalescer In-Place Span Merging, Processor Init Cleanup & Metrics Collision Bounds (`internal/arena`, `internal/coalesce`, `internal/metricsmerge`, `processor.go`, `README.md`)
-
-**Files:**
-- Modify: `processor/onnxredactionprocessor/internal/arena/arena.go`
-- Modify: `processor/onnxredactionprocessor/internal/arena/arena_test.go`
-- Modify: `processor/onnxredactionprocessor/internal/coalesce/coalesce.go:327,529-547`
-- Modify: `processor/onnxredactionprocessor/internal/metricsmerge/merge.go:33-52,164-182,235-237`
-- Modify: `processor/onnxredactionprocessor/internal/metricsmerge/merge_test.go`
-- Modify: `processor/onnxredactionprocessor/processor.go:43-179`
-- Modify: `processor/onnxredactionprocessor/processor_test.go`
-- Modify: `README.md:269`
-
-**Interfaces:**
-- Consumes: `arena.Pool`, `coalesce.Coalescer`, `metricsmerge.ResolveCollisions`, `tokenizer.Tokenizer`
-- Produces: Bounded arena buffers, zero-extra-slice span merging in `Coalescer`, leak-free `newProcessor` error cleanup, and explicit-bounds-safe `ResolveCollisions`.
-
-- [ ] **Step 1: Write failing tests in `arena_test.go` and `merge_test.go`**
-
-1. In `processor/onnxredactionprocessor/internal/arena/arena_test.go`, add `TestPool_OversizedSliceCapReset`:
-```go
-func TestPool_OversizedSliceCapReset(t *testing.T) {
-	pool := NewPool(4, 16, 19) // tensorElements = 64
-	a := pool.Acquire()
-
-	// Grow TokenIDPool, OffsetPool, Windows, SpanScratch, and ScratchBytes past 4x baseline
-	a.TokenIDPool = make([]int64, 1000)
-	a.OffsetPool = make([]types.Offset, 1000)
-	a.Windows = make([]types.TokenWindow, 100)
-	a.SpanScratch = make([]types.EntitySpan, 500)
-	a.ScratchBytes = make([]byte, 131072)
-
-	// Slice InputIDs/Logits down as DetectBatch does
-	a.InputIDs = a.InputIDs[:8]
-	a.AttentionMask = a.AttentionMask[:8]
-	a.Logits = a.Logits[:8*19]
-
-	pool.Release(a)
-
-	b := pool.Acquire()
-	defer pool.Release(b)
-
-	assert.Equal(t, 64, len(b.InputIDs), "InputIDs length must be restored to tensorElements")
-	assert.Equal(t, 64*19, len(b.Logits), "Logits length must be restored to logitsElements")
-	assert.LessOrEqual(t, cap(b.TokenIDPool), 256, "oversized TokenIDPool must be reallocated to baseline")
-	assert.LessOrEqual(t, cap(b.OffsetPool), 256, "oversized OffsetPool must be reallocated to baseline")
-	assert.LessOrEqual(t, cap(b.Windows), 16, "oversized Windows must be reallocated to baseline")
-	assert.LessOrEqual(t, cap(b.SpanScratch), 256, "oversized SpanScratch must be reallocated to baseline")
-	assert.LessOrEqual(t, cap(b.ScratchBytes), 65536, "oversized ScratchBytes must be reallocated to baseline")
 }
 ```
 2. In `processor/onnxredactionprocessor/internal/metricsmerge/merge_test.go`, add `TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds`:
@@ -321,10 +311,123 @@ func TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds(t *testin
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd processor/onnxredactionprocessor && go test -v -run "TestPool_OversizedSliceCapReset|TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds" ./internal/arena ./internal/metricsmerge`
+Run: `cd processor/onnxredactionprocessor && go test -v -run "TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange|TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds" ./internal/tokenizer ./internal/metricsmerge`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement fixes in `arena.go`, `coalesce.go`, `merge.go`, `processor.go`, and `README.md`**
+- [ ] **Step 3: Implement fixes in `tokenizer.go` and `merge.go`**
+
+1. In `processor/onnxredactionprocessor/internal/tokenizer/tokenizer.go` (`tokenizeWordSlow`, lines 319–379):
+   - Lowercase `text[wordStart:wordEnd]` rune-by-rune while recording `textOffsets []int` mapping each byte in lowercased `word` to its relative start byte in `text[wordStart:wordEnd]` (with `textOffsets[len(word)] = wordEnd - wordStart`), and use `wordStart + textOffsets[subStart]` and `wordStart + textOffsets[subEnd]` when appending `dstOffsets`.
+2. In `processor/onnxredactionprocessor/internal/metricsmerge/merge.go`:
+   - Import `"slices"`.
+   - In `ComputeCanonicalAttrHash`, mix `uint64(len(k))` (`h ^= uint64(len(k)); h *= fnvPrime64`) before hashing key bytes and `uint64(len(s))` (`h ^= uint64(len(s)); h *= fnvPrime64`) before hashing value bytes.
+   - In `ResolveCollisions` (`Histogram` at line 164 and `ExponentialHistogram` at line 235), add `else if !target.HasSum() && dp.HasSum() { target.SetSum(dp.Sum()) }`.
+   - In `ResolveCollisions` (`Histogram` at line 178), check `target.BucketCounts().Len() == dp.BucketCounts().Len() && slices.Equal(target.ExplicitBounds().AsRaw(), dp.ExplicitBounds().AsRaw())`.
+
+- [ ] **Step 4: Run package tests to verify they pass**
+
+Run: `cd processor/onnxredactionprocessor && go test -race -count=1 -v ./internal/tokenizer/... ./internal/metricsmerge/...`
+Expected: PASS.
+
+- [ ] **Step 5: Stage and commit Track C changes (Coordinator)**
+
+```bash
+git add processor/onnxredactionprocessor/internal/tokenizer/tokenizer.go processor/onnxredactionprocessor/internal/tokenizer/tokenizer_test.go processor/onnxredactionprocessor/internal/metricsmerge/merge.go processor/onnxredactionprocessor/internal/metricsmerge/merge_test.go
+git commit -m "fix(tokenizer,metricsmerge): map slow-path rune offsets and harden metric collision hashing and bounds"
+```
+
+---
+
+### Task 4 (Parallel Track D): Arena Retention Caps, Coalescer In-Place Span Merging, Processor Init Cleanup & `README.md` (`internal/arena`, `internal/coalesce`, `processor.go`, `README.md`)
+
+**Files:**
+- Modify: `processor/onnxredactionprocessor/internal/arena/arena.go`
+- Modify: `processor/onnxredactionprocessor/internal/arena/arena_test.go`
+- Modify: `processor/onnxredactionprocessor/internal/coalesce/coalesce.go:327,529-547`
+- Modify: `processor/onnxredactionprocessor/processor.go:43-179`
+- Modify: `processor/onnxredactionprocessor/processor_test.go`
+- Modify: `README.md:269`
+
+**Interfaces:**
+- Consumes: `arena.Pool`, `coalesce.Coalescer`, `tokenizer.Tokenizer`
+- Produces: Bounded `arena.Pool.Release`, allocation-reduced `coalesce.Coalescer.executeBatch`, leak-free `newProcessor` error path and `Shutdown`.
+
+- [ ] **Step 1: Write failing tests in `arena_test.go` and `processor_test.go`**
+
+1. In `processor/onnxredactionprocessor/internal/arena/arena_test.go`, add `TestPool_OversizedSliceCapReset`:
+```go
+func TestPool_OversizedSliceCapReset(t *testing.T) {
+	pool := NewPool(4, 16, 19) // tensorElements = 64
+	a := pool.Acquire()
+
+	// Grow TokenIDPool, OffsetPool, Windows, SpanScratch, and ScratchBytes past 4x baseline
+	a.TokenIDPool = make([]int64, 1000)
+	a.OffsetPool = make([]types.Offset, 1000)
+	a.Windows = make([]types.TokenWindow, 100)
+	a.SpanScratch = make([]types.EntitySpan, 500)
+	a.ScratchBytes = make([]byte, 131072)
+
+	// Slice InputIDs/Logits down as DetectBatch does
+	a.InputIDs = a.InputIDs[:8]
+	a.AttentionMask = a.AttentionMask[:8]
+	a.Logits = a.Logits[:8*19]
+
+	pool.Release(a)
+
+	b := pool.Acquire()
+	defer pool.Release(b)
+
+	assert.Equal(t, 64, len(b.InputIDs), "InputIDs length must be restored to tensorElements")
+	assert.Equal(t, 64*19, len(b.Logits), "Logits length must be restored to logitsElements")
+	assert.LessOrEqual(t, cap(b.TokenIDPool), 256, "oversized TokenIDPool must be reallocated to baseline")
+	assert.LessOrEqual(t, cap(b.OffsetPool), 256, "oversized OffsetPool must be reallocated to baseline")
+	assert.LessOrEqual(t, cap(b.Windows), 16, "oversized Windows must be reallocated to baseline")
+	assert.LessOrEqual(t, cap(b.SpanScratch), 256, "oversized SpanScratch must be reallocated to baseline")
+	assert.LessOrEqual(t, cap(b.ScratchBytes), 65536, "oversized ScratchBytes must be reallocated to baseline")
+}
+```
+2. In `processor/onnxredactionprocessor/processor_test.go`, add `TestProcessor_TokenizerCloseOnShutdownAndInitError`:
+```go
+type closeTrackingTokenizer struct {
+	tokenizer.Tokenizer
+	closed int
+}
+
+func (c *closeTrackingTokenizer) Close() error {
+	c.closed++
+	return nil
+}
+
+func TestProcessor_TokenizerCloseOnShutdownAndInitError(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Model.TokenizerPath = filepath.Clean("testdata/tokenizer.json")
+	cfg.Model.Path = "testdata/nonexistent_model.onnx"
+
+	baseTok, err := tokenizer.NewWordPieceTokenizer(cfg.Model.TokenizerPath, "")
+	require.NoError(t, err)
+	trackTok := &closeTrackingTokenizer{Tokenizer: baseTok}
+
+	set := processortest.NewNopSettings(Type)
+	// 1. When detector init fails, newProcessor must close tokenizer and telemetry
+	_, err = newProcessor(cfg, &set.TelemetrySettings, trackTok, nil)
+	require.Error(t, err)
+	assert.Equal(t, 1, trackTok.closed, "tokenizer must be closed when newProcessor fails during engine init")
+
+	// 2. When processor succeeds and Shutdown is called, tokenizer.Close() must be called
+	trackTok2 := &closeTrackingTokenizer{Tokenizer: baseTok}
+	proc, err := newProcessor(cfg, &set.TelemetrySettings, trackTok2, &stubDetector{})
+	require.NoError(t, err)
+	require.NoError(t, proc.Shutdown(context.Background()))
+	assert.Equal(t, 1, trackTok2.closed, "tokenizer must be closed on processor Shutdown")
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd processor/onnxredactionprocessor && go test -v -run "TestPool_OversizedSliceCapReset|TestProcessor_TokenizerCloseOnShutdownAndInitError" ./internal/arena .`
+Expected: FAIL.
+
+- [ ] **Step 3: Implement fixes in `arena.go`, `coalesce.go`, `processor.go`, and `README.md`**
 
 1. In `processor/onnxredactionprocessor/internal/arena/arena.go`:
    - Store `maxBatchSize`, `tensorElements`, and `logitsElements` on `Pool`.
@@ -339,31 +442,24 @@ Expected: FAIL.
      - If `cap(a.ScratchBytes) > 65536`, clear and reallocate `make([]byte, 0, 16384)`, else `clear(a.ScratchBytes[:cap(a.ScratchBytes)])` and reslice `[:0]`.
 2. In `processor/onnxredactionprocessor/internal/coalesce/coalesce.go`:
    - At line 327, preallocate `activeRequests := make([]*callerRequest, 0, len(batch))`.
-   - At lines 529–547, merge in-place (`parentSpans[idx] = decode.MergeSpans(parentSpans[idx])`) and read `spans := parentSpans[idx]`, removing `mergedSpans`.
-3. In `processor/onnxredactionprocessor/internal/metricsmerge/merge.go`:
-   - Import `"slices"`.
-   - In `ComputeCanonicalAttrHash`, hash `uint64(len(k))` before key bytes and `uint64(len(s))` before value bytes.
-   - In `ResolveCollisions` (`Histogram` and `ExponentialHistogram`), add `else if !target.HasSum() && dp.HasSum() { target.SetSum(dp.Sum()) }`.
-   - In `ResolveCollisions` (`Histogram`), check `target.BucketCounts().Len() == dp.BucketCounts().Len() && slices.Equal(target.ExplicitBounds().AsRaw(), dp.ExplicitBounds().AsRaw())`.
-4. In `processor/onnxredactionprocessor/processor.go`:
+   - At lines 529–547, merge spans in-place (`parentSpans[idx] = decode.MergeSpans(parentSpans[idx])`) and read `spans := parentSpans[idx]`, removing `mergedSpans`.
+3. In `processor/onnxredactionprocessor/processor.go`:
    - Add `tokenizer tokenizer.Tokenizer` to `redactionProcessor`.
-   - In `newProcessor`, if `tok` or `det` initialisation fails after `newTelemetry`, call `_ = tel.Close()` (and `_ = tok.Close()` if `det` fails).
-   - In `Shutdown`, close `p.tokenizer` if non-nil.
-5. In `README.md:269`:
+   - In `newProcessor`, if `tok` or `det` initialisation fails after `newTelemetry`, call `_ = tel.Close()` (and `_ = tok.Close()` if `det` fails and `tok != nil`).
+   - Populate `tokenizer: tok` on `&redactionProcessor{...}` and close `p.tokenizer` in `Shutdown`.
+4. In `README.md:269`:
    - Update `(`filter`, `bytes_body`)` to `(`filter`, `bytes_body`, `max_depth`)`.
 
-- [ ] **Step 4: Run full test suite, benchmarks, and linters**
+- [ ] **Step 4: Run package tests to verify they pass**
 
-Run: `make fmt && make lint && make test && make bench`
-Expected:
-- `PASSED: All 14 markdown file(s) adhere to Australian English spelling.`
-- `0 issues.`
-- All 14 Go packages pass `-race` tests and benchmarks.
+Run: `cd processor/onnxredactionprocessor && go test -race -count=1 -v ./internal/arena/... ./internal/coalesce/... .`
+Expected: PASS.
 
-- [ ] **Step 5: Commit and push to `origin/fix/gatekeeper-remediation`**
+- [ ] **Step 5: Stage and commit Track D changes, run full verification, and push (Coordinator)**
 
 ```bash
-git add processor/onnxredactionprocessor/internal/arena/arena.go processor/onnxredactionprocessor/internal/arena/arena_test.go processor/onnxredactionprocessor/internal/coalesce/coalesce.go processor/onnxredactionprocessor/internal/metricsmerge/merge.go processor/onnxredactionprocessor/internal/metricsmerge/merge_test.go processor/onnxredactionprocessor/processor.go README.md docs/superpowers/specs/2026-10-24-gatekeeper-round2-design.md docs/superpowers/plans/2026-10-24-gatekeeper-round2.md
-git commit -m "fix(arena,coalesce,metricsmerge,processor): bound arena retention, harden metric collisions, and clean up init errors"
+git add processor/onnxredactionprocessor/internal/arena/arena.go processor/onnxredactionprocessor/internal/arena/arena_test.go processor/onnxredactionprocessor/internal/coalesce/coalesce.go processor/onnxredactionprocessor/processor.go processor/onnxredactionprocessor/processor_test.go README.md
+git commit -m "fix(arena,coalesce,processor): cap arena retention, merge spans in-place, and clean up init/shutdown resources"
+make fmt && make lint && make test && make bench
 git push origin fix/gatekeeper-remediation
 ```
