@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:dispatching-parallel-agents and superpowers:subagent-driven-development to implement Tasks 1–4 concurrently across strictly disjoint packages, followed by superpowers:test-driven-development (Red-Green-Refactor) within each subagent. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Remediate all validated P0, P1, P2, and documentation findings from the Round 2 static analysis and memory safety audit using test-driven development and parallel subagents.
+**Goal:** Remediate all validated P0, P1, P2, and documentation findings from the Round 2 static analysis and architectural review using test-driven development and parallel subagents.
 
 **Architecture:** Partition the 8 validated findings into 4 strictly disjoint, zero-shared-file parallel subagent tracks with unchanged cross-package signatures:
 - **Track A (Task 1 — `internal/mask`):** Post-widening span overlap clamping and hex-validated `\uXXXX` JSON escapes.
-- **Track B (Task 2 — `internal/ort`, `internal/decode`):** CGo `FLOAT` output tensor element type validation, slice reslicing, `runtime.KeepAlive`, and decoder class bounds checking.
-- **Track C (Task 3 — `internal/tokenizer`, `internal/metricsmerge`):** Slow-path multi-byte UTF-8 rune offset mapping, length-prefixed canonical attribute hashing, and explicit histogram bounds validation.
-- **Track D (Task 4 — `internal/arena`, `internal/coalesce`, `processor.go`, `README.md`):** Active-slice arena zeroing with `4x` retention caps, coalescer in-place span merging, processor init error cleanup / tokeniser shutdown, and `README.md` metric documentation.
+- **Track B (Task 2 — `internal/ort`, `internal/decode`):** CGo `FLOAT` output tensor element type validation, overflow-safe capacity bounds, slice reslicing, `runtime.KeepAlive`, and decoder class bounds checking.
+- **Track C (Task 3 — `internal/tokenizer`, `internal/metricsmerge`):** Slow-path multi-byte UTF-8 rune offset mapping, type/length-prefixed canonical attribute hashing, and explicit histogram bounds validation.
+- **Track D (Task 4 — `internal/arena`, `internal/coalesce`, `processor.go`, `README.md`):** Multi-sub-batch safe arena zeroing with `4x` retention caps, coalescer in-place span merging, deferred `newProcessor` error rollback / tokeniser shutdown, and `README.md` metric documentation.
 
 **Tech Stack:** Go 1.27, CGo (`onnxruntime_c_api.h` v1.31.0), OpenTelemetry Collector `pdata` v0.163.0, `stretchr/testify`.
 
@@ -32,11 +32,11 @@
 
 ## Review Focus
 
-- Adjacent PII spans separated by JSON escaped quotes (`\"Alice\"\"bob@example.com\"`) where `widenJSONEscapes` causes widened boundaries to meet or overlap.
-- Windows file paths containing `\u` directory prefixes (`C:\u1\alice` or `C:\\u0041\\alice`) that are not valid JSON `\uXXXX` escapes.
+- Non-overlapping raw spans that touch inside a `\uXXXX` or `\"` JSON escape so `widenJSONEscapes` expands both spans into overlapping byte ranges.
+- Windows file paths containing `\u` directory prefixes (`C:\u1\alice` or `C:\\u0041\alice`) that are not valid JSON `\uXXXX` escapes.
 - Models or callers passing `numClasses > len(idToBIO)` to `DecodeWindow` or `len(a.Logits) == 0` (with `cap(a.Logits) > 0`) to `DetectBatch`.
-- Attribute maps whose keys or values contain delimiter characters (`=` or `;`) such as `{"a": "b;c=d"}` vs `{"a": "b", "c": "d"}`.
-- Oversized `BatchArena` slice growth during traffic bursts followed by `Pool.Release(a)` returning the arena to `sync.Pool`.
+- Attribute maps whose keys or values contain delimiter characters (`=` or `;`) such as `{"a": "b;c=d"}` vs `{"a": "b", "c": "d"}`, or string vs integer values (`{"a": "1"}` vs `{"a": 1}`).
+- Multi-sub-batch `DetectBatch` calls where Sub-batch 1 dirties a larger slice prefix than Sub-batch 2 before `Pool.Release(a)` zeroes the arena.
 
 ---
 
@@ -56,10 +56,23 @@ Add `TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths` to `processor/onnxredac
 
 ```go
 func TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths(t *testing.T) {
-	// 1. Two non-overlapping spans separated by escaped quotes \" where widening overlaps
-	jsonAdj := `{"pair": "\"Alice\"\"bob@example.com\""}`
-	sAlice := spanOf(jsonAdj, "Alice", types.LabelPerson)
-	sBob := spanOf(jsonAdj, "bob@example.com", types.LabelEmail)
+	// 1. Two non-overlapping raw spans meeting inside \u0020 (or \") where widening overlaps:
+	// Span 1 ends at '0' inside \u0020 (uIdx+3 -> Rule 3 widens end to uIdx+6),
+	// Span 2 starts at '0' inside \u0020 (uIdx+3 -> Rule 1 widens start to uIdx).
+	jsonAdj := `{"pair": "Alice\u0020bob@example.com"}`
+	uIdx := strings.Index(jsonAdj, `\u0020`)
+	sAlice := types.EntitySpan{
+		Start:      strings.Index(jsonAdj, "Alice"),
+		End:        uIdx + 3,
+		Label:      types.LabelPerson,
+		Confidence: 0.95,
+	}
+	sBob := types.EntitySpan{
+		Start:      uIdx + 3,
+		End:        strings.Index(jsonAdj, "bob@example.com") + len("bob@example.com"),
+		Label:      types.LabelEmail,
+		Confidence: 0.95,
+	}
 	outAdj, err := Mask(jsonAdj, []types.EntitySpan{sAlice, sBob}, 16384, types.ErrorModeDrop, nil)
 	require.NoError(t, err, "post-widening overlap between non-overlapping raw spans must be clamped, not rejected")
 	assert.Contains(t, outAdj, "[REDACTED_PERSON]")
@@ -86,7 +99,7 @@ func TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd processor/onnxredactionprocessor && go test -v -run TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths ./internal/mask`
-Expected: FAIL (`mask: overlapping spans detected` on `jsonAdj` and corrupted `C:[REDACTED_PATH_USER]\secret.txt` on `winPath`).
+Expected: FAIL (`mask: overlapping spans detected at offset 15` on `jsonAdj` and `C:[REDACTED_PATH_USER]\secret.txt` on `winPath`).
 
 - [ ] **Step 3: Implement raw overlap check, post-widening clamping, and `isValidUnicodeEscape` in `processor/onnxredactionprocessor/internal/mask/mask.go`**
 
@@ -113,7 +126,7 @@ git commit -m "fix(mask): clamp post-widening span overlaps and validate hex in 
 
 **Files:**
 - Modify: `processor/onnxredactionprocessor/internal/ort/ort_shim.c:43-56,160-317`
-- Modify: `processor/onnxredactionprocessor/internal/ort/engine.go:11,184-286`
+- Modify: `processor/onnxredactionprocessor/internal/ort/engine.go:11,136,184-286`
 - Modify: `processor/onnxredactionprocessor/internal/ort/engine_test.go`
 - Modify: `processor/onnxredactionprocessor/internal/decode/decode.go:106-135`
 - Modify: `processor/onnxredactionprocessor/internal/decode/decode_test.go`
@@ -185,32 +198,16 @@ Expected: FAIL (panics in `decode.go:106` and `engine.go:264/266`).
 
 1. In `processor/onnxredactionprocessor/internal/ort/ort_shim.c`:
    - In `ort_shim_create_session`, add `(void)concurrent_runs;`.
-   - In `ort_shim_run_batch`, reject `batch_size <= 0 || seq_len <= 0` at entry, and after `GetTensorTypeAndShape`, call `g_ort->GetTensorElementType(shape_info, &elem_type)` and verify `elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT`:
-```c
-    ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-    st = g_ort->GetTensorElementType(shape_info, &elem_type);
-    if (st) {
-        if (out_err) *out_err = strdup(g_ort->GetErrorMessage(st));
-        g_ort->ReleaseStatus(st);
-        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
-        g_ort->ReleaseValue(out_tensors[0]);
-        return -1;
-    }
-    if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
-        g_ort->ReleaseValue(out_tensors[0]);
-        if (out_err) *out_err = strdup("ort_shim: unexpected output tensor element type (expected float32)");
-        return -1;
-    }
-```
+   - In `ort_shim_run_batch`, reject `batch_size <= 0 || seq_len <= 0 || out_logits_cap <= 0` at entry, verify `elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT` via `g_ort->GetTensorElementType(shape_info, &elem_type)`, and check `if (num_classes > out_logits_cap / (batch_size * seq_len))` before multiplying `total_elements = batch_size * seq_len * num_classes`.
 2. In `processor/onnxredactionprocessor/internal/ort/engine.go`:
    - Import `"runtime"`.
+   - In `NewEngine` (`engine.go:136`), size `warmArena := arena.NewPool(1, 2, 64).Acquire()`.
    - At the start of `DetectBatch`, return `nil, nil` if `len(batch.Windows) == 0 || batch.MaxSeqLen <= 0`.
    - Check `cap(a.InputIDs) < totalElements || cap(a.AttentionMask) < totalElements || cap(a.Logits) == 0`.
    - Reslice `a.Logits = a.Logits[:cap(a.Logits)]` before taking `logitsPtr := (*C.float)(unsafe.Pointer(&a.Logits[0]))`.
    - Call `runtime.KeepAlive(a)` immediately after `C.ort_shim_run_batch(...)`.
 3. In `processor/onnxredactionprocessor/internal/decode/decode.go`:
-   - In `DecodeWindow`, guard `bestClass < len(d.classToLabel)` before indexing `d.classToLabel[bestClass]`, `d.isB[bestClass]`, and `d.isI[bestClass]`.
+   - In `DecodeWindow`, guard `bestClass < len(d.classToLabel)` before indexing `d.classToLabel[bestClass]`.
 
 - [ ] **Step 4: Run package tests to verify they pass**
 
@@ -281,7 +278,16 @@ func TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds(t *testin
 	h2, _ := ComputeCanonicalAttrHash(m2, scratch)
 	assert.NotEqual(t, h1, h2, "maps with embedded '=' and ';' delimiters must not collide")
 
-	// 2. Histogram with mismatched ExplicitBounds must not sum BucketCounts
+	// 2. Type collision resistance: {"a": "123"} vs {"a": 123}
+	mStr := pcommon.NewMap()
+	mStr.PutStr("a", "123")
+	mInt := pcommon.NewMap()
+	mInt.PutInt("a", 123)
+	hStr, scratch := ComputeCanonicalAttrHash(mStr, scratch)
+	hInt, _ := ComputeCanonicalAttrHash(mInt, scratch)
+	assert.NotEqual(t, hStr, hInt, "string attribute '123' and int attribute 123 must not collide")
+
+	// 3. Histogram with mismatched ExplicitBounds must not sum BucketCounts
 	metric := pmetric.NewMetric()
 	hist := metric.SetEmptyHistogram()
 	ts := pcommon.Timestamp(1000)
@@ -320,7 +326,7 @@ Expected: FAIL.
    - Lowercase `text[wordStart:wordEnd]` rune-by-rune while recording `textOffsets []int` mapping each byte in lowercased `word` to its relative start byte in `text[wordStart:wordEnd]` (with `textOffsets[len(word)] = wordEnd - wordStart`), and use `wordStart + textOffsets[subStart]` and `wordStart + textOffsets[subEnd]` when appending `dstOffsets`.
 2. In `processor/onnxredactionprocessor/internal/metricsmerge/merge.go`:
    - Import `"slices"`.
-   - In `ComputeCanonicalAttrHash`, mix `uint64(len(k))` (`h ^= uint64(len(k)); h *= fnvPrime64`) before hashing key bytes and `uint64(len(s))` (`h ^= uint64(len(s)); h *= fnvPrime64`) before hashing value bytes.
+   - In `ComputeCanonicalAttrHash`, mix `uint64(len(k))` (`h ^= uint64(len(k)); h *= fnvPrime64`) before hashing key bytes, and mix `uint64(v.Type())` and `uint64(len(s))` before hashing value bytes.
    - In `ResolveCollisions` (`Histogram` at line 164 and `ExponentialHistogram` at line 235), add `else if !target.HasSum() && dp.HasSum() { target.SetSum(dp.Sum()) }`.
    - In `ResolveCollisions` (`Histogram` at line 178), check `target.BucketCounts().Len() == dp.BucketCounts().Len() && slices.Equal(target.ExplicitBounds().AsRaw(), dp.ExplicitBounds().AsRaw())`.
 
@@ -360,17 +366,20 @@ func TestPool_OversizedSliceCapReset(t *testing.T) {
 	pool := NewPool(4, 16, 19) // tensorElements = 64
 	a := pool.Acquire()
 
+	// Dirty index 30 (simulating Sub-batch 1), then slice down to [:8] (simulating Sub-batch 2)
+	a.InputIDs[30] = 999
+	a.AttentionMask[30] = 1
+	a.Logits[30] = 42.0
+	a.InputIDs = a.InputIDs[:8]
+	a.AttentionMask = a.AttentionMask[:8]
+	a.Logits = a.Logits[:8*19]
+
 	// Grow TokenIDPool, OffsetPool, Windows, SpanScratch, and ScratchBytes past 4x baseline
 	a.TokenIDPool = make([]int64, 1000)
 	a.OffsetPool = make([]types.Offset, 1000)
 	a.Windows = make([]types.TokenWindow, 100)
 	a.SpanScratch = make([]types.EntitySpan, 500)
 	a.ScratchBytes = make([]byte, 131072)
-
-	// Slice InputIDs/Logits down as DetectBatch does
-	a.InputIDs = a.InputIDs[:8]
-	a.AttentionMask = a.AttentionMask[:8]
-	a.Logits = a.Logits[:8*19]
 
 	pool.Release(a)
 
@@ -379,6 +388,9 @@ func TestPool_OversizedSliceCapReset(t *testing.T) {
 
 	assert.Equal(t, 64, len(b.InputIDs), "InputIDs length must be restored to tensorElements")
 	assert.Equal(t, 64*19, len(b.Logits), "Logits length must be restored to logitsElements")
+	assert.Equal(t, int64(0), b.InputIDs[30], "InputIDs beyond final sub-batch slice must still be zeroed")
+	assert.Equal(t, int64(0), b.AttentionMask[30], "AttentionMask beyond final sub-batch slice must still be zeroed")
+	assert.Equal(t, float32(0), b.Logits[30], "Logits beyond final sub-batch slice must still be zeroed")
 	assert.LessOrEqual(t, cap(b.TokenIDPool), 256, "oversized TokenIDPool must be reallocated to baseline")
 	assert.LessOrEqual(t, cap(b.OffsetPool), 256, "oversized OffsetPool must be reallocated to baseline")
 	assert.LessOrEqual(t, cap(b.Windows), 16, "oversized Windows must be reallocated to baseline")
@@ -432,9 +444,9 @@ Expected: FAIL.
 1. In `processor/onnxredactionprocessor/internal/arena/arena.go`:
    - Store `maxBatchSize`, `tensorElements`, and `logitsElements` on `Pool`.
    - In `Release(a)`:
-     - Call `clear(a.InputIDs)` and restore `a.InputIDs = a.InputIDs[:cap(a.InputIDs)]`.
-     - Call `clear(a.AttentionMask)` and restore `a.AttentionMask = a.AttentionMask[:cap(a.AttentionMask)]`.
-     - Call `clear(a.Logits)` and restore `a.Logits = a.Logits[:cap(a.Logits)]`.
+     - Reslice `a.InputIDs = a.InputIDs[:cap(a.InputIDs)]` and call `clear(a.InputIDs)`.
+     - Reslice `a.AttentionMask = a.AttentionMask[:cap(a.AttentionMask)]` and call `clear(a.AttentionMask)`.
+     - Reslice `a.Logits = a.Logits[:cap(a.Logits)]` and call `clear(a.Logits)`.
      - Call `clear(a.TokenIDPool)` (active length only); if `cap(a.TokenIDPool) > 4*p.tensorElements`, reallocate `make([]int64, 0, p.tensorElements)`, else reslice `[:0]`.
      - If `cap(a.OffsetPool) > 4*p.tensorElements`, reallocate `make([]types.Offset, 0, p.tensorElements)`, else reslice `[:0]`.
      - If `cap(a.Windows) > 4*p.maxBatchSize`, reallocate `make([]types.TokenWindow, 0, p.maxBatchSize)`, else reslice `[:0]`.
@@ -445,7 +457,7 @@ Expected: FAIL.
    - At lines 529–547, merge spans in-place (`parentSpans[idx] = decode.MergeSpans(parentSpans[idx])`) and read `spans := parentSpans[idx]`, removing `mergedSpans`.
 3. In `processor/onnxredactionprocessor/processor.go`:
    - Add `tokenizer tokenizer.Tokenizer` to `redactionProcessor`.
-   - In `newProcessor`, if `tok` or `det` initialisation fails after `newTelemetry`, call `_ = tel.Close()` (and `_ = tok.Close()` if `det` fails and `tok != nil`).
+   - In `newProcessor`, register a `var success bool` with `defer func() { if !success { _ = tel.Close(); if tok != nil { _ = tok.Close() }; if det != nil { _ = det.Close() } } }()`, and set `success = true` immediately before returning `&redactionProcessor{...}, nil`.
    - Populate `tokenizer: tok` on `&redactionProcessor{...}` and close `p.tokenizer` in `Shutdown`.
 4. In `README.md:269`:
    - Update `(`filter`, `bytes_body`)` to `(`filter`, `bytes_body`, `max_depth`)`.
