@@ -1,6 +1,6 @@
 # vector-onnx-redactor: In-Process OpenTelemetry ONNX PII Redactor
 
-[![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.27%2B-blue.svg)](https://golang.org)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-Collector%20v0.163.0-orange.svg)](https://opentelemetry.io)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX%20Runtime-v1.31.0-brightgreen.svg)](https://onnxruntime.ai)
 [![Licence](https://img.shields.io/badge/Licence-Apache%202.0-blue.svg)](LICENSE)
@@ -104,7 +104,7 @@ BenchmarkPipeline_FullInference-10         1,062  1,185,635 ns/op  10,787 B/op  
 
 ### Prerequisites
 
-* **Go:** Version 1.22 or higher.
+* **Go:** Version 1.27 or higher.
 * **ONNX Runtime:** Version 1.31.0 C API headers and shared libraries (`libonnxruntime.so` on Linux, `libonnxruntime.dylib` on macOS).
 * **OpenTelemetry Collector Builder (`ocb`):** Version 0.163.2 or higher.
 * **C Compiler:** `clang` (macOS) or `gcc` (Linux).

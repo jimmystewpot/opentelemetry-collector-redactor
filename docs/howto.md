@@ -35,7 +35,7 @@ For detailed operating system, hardware vectorisation, and GPU server accelerati
 ### Prerequisites
 
 * **Operating System:** macOS (Apple Silicon ARM64 or Intel x86_64) or Linux (Ubuntu 22.04+, Debian 12+, RHEL 9+ on `aarch64` or `x86_64`).
-* **Go Compiler:** Go 1.22 or newer (1.27 recommended).
+* **Go Compiler:** Go 1.27 or newer.
 * **C Toolchain:** `clang` (Xcode command line tools on macOS) or `gcc` / `build-essential` (Linux).
 * **Python:** Python 3.10+ (for model export and quantisation scripts).
 
@@ -79,7 +79,7 @@ When running `go test`, `go build`, or IDE tooling manually outside the Makefile
 
 ```bash
 export CGO_CFLAGS="-I$(pwd)/.ort/include"
-export CGO_LDFLAGS="-L$(pwd)/.ort/lib -lonnxruntime -rpath $(pwd)/.ort/lib"
+export CGO_LDFLAGS="-L$(pwd)/.ort/lib -lonnxruntime -Wl,-rpath,$(pwd)/.ort/lib"
 export DYLD_LIBRARY_PATH="$(pwd)/.ort/lib:${DYLD_LIBRARY_PATH:-}"
 ```
 
@@ -125,7 +125,7 @@ To convert a fine-tuned HuggingFace model into a dynamic INT8 quantised ONNX for
 3. Compute the SHA-256 integrity checksums for operator verification:
 
    ```bash
-   sha256sum ./models/ner-int8/model.onnx
+   sha256sum ./models/ner-int8/model_int8.onnx
    sha256sum ./models/ner-int8/tokenizer.json
    ```
 
@@ -221,7 +221,7 @@ processors:
 
   onnxredaction:
     model:
-      path: /etc/otel/models/model.onnx
+      path: /etc/otel/models/tiny_ner.onnx
       sha256: 7ef06dbfe51de3cd4cb08c2075a390b21ad261b28e7c7f9e36e6e66d2d7329a8
       tokenizer_path: /etc/otel/models/tokenizer.json
       tokenizer_sha256: 094033eb54d75f1d08c3726a0f0a0ab42c92ccb0f22bd27f4e9ed2d1caccd2fa
@@ -363,7 +363,7 @@ Set Prometheus alerts on the following key metrics:
 
 * **Symptom:** Collector fails to start with:
   ```text
-  ort: checksum mismatch for model /etc/otel/models/model.onnx: expected <sha>, got <sha>
+  ort: checksum mismatch for model /etc/otel/models/tiny_ner.onnx: expected <sha>, got <sha>
   ```
 * **Root Cause:** The model file was modified, corrupted during download, or the configuration SHA-256 hash was not updated following model retraining.
 * **Resolution:** Recompute `sha256sum /etc/otel/models/model.onnx` and verify the integrity of the file before updating `config.yaml`.
