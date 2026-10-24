@@ -17,6 +17,8 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/processor/processortest"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/arena"
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/detect"
@@ -616,4 +618,64 @@ func TestProcessor_MaxNestingDepth(t *testing.T) {
 	leaf, ok := outCurr.Get("secret_key")
 	require.True(t, ok)
 	assert.Equal(t, types.RedactedUninspected, leaf.Str())
+
+	// Dry-run mode with on_error: drop must NOT scrub deeply nested values,
+	// but MUST still record redaction_skipped_total{reason="max_depth"}
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+
+	cfgDry := createDefaultConfig().(*Config)
+	cfgDry.Inference.CoalesceWindow = 5 * time.Millisecond
+	cfgDry.OnError = types.ErrorModeDrop
+	cfgDry.DryRun = true
+
+	setDry := processortest.NewNopSettings(Type)
+	setDry.MeterProvider = mp
+	procDry, err := newProcessor(cfgDry, &setDry.TelemetrySettings, &mockTokenizer{}, &ruleDetector{})
+	require.NoError(t, err)
+	defer func() { _ = procDry.Shutdown(context.Background()) }()
+
+	sinkDry := new(consumertest.LogsSink)
+	procDry.nextLogs = sinkDry
+
+	ldDry := plog.NewLogs()
+	recDry := ldDry.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	currDry := recDry.Body().SetEmptyMap()
+	for i := 0; i < 34; i++ {
+		currDry = currDry.PutEmptyMap(fmt.Sprintf("k%d", i))
+	}
+	currDry.PutStr("secret_key", "secret")
+
+	require.NoError(t, procDry.ConsumeLogs(context.Background(), ldDry))
+	require.Len(t, sinkDry.AllLogs(), 1)
+	outDry := sinkDry.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body().Map()
+	for i := 0; i < 34; i++ {
+		v, ok := outDry.Get(fmt.Sprintf("k%d", i))
+		require.True(t, ok)
+		outDry = v.Map()
+	}
+	leafDry, ok := outDry.Get("secret_key")
+	require.True(t, ok)
+	assert.Equal(t, "secret", leafDry.Str(), "dry_run must preserve deeply nested string")
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var skippedCount, scrubbedCount int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch m.Name {
+			case "redaction_skipped_total":
+				for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+					skippedCount += dp.Value
+				}
+			case "redaction_scrubbed_total":
+				for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+					scrubbedCount += dp.Value
+				}
+			}
+		}
+	}
+	assert.Equal(t, int64(1), skippedCount, "redaction_skipped_total must be recorded in dry_run")
+	assert.Equal(t, int64(0), scrubbedCount, "redaction_scrubbed_total must be 0 in dry_run")
 }

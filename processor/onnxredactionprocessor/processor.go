@@ -296,6 +296,8 @@ func (p *redactionProcessor) processMetrics(ctx context.Context, md pmetric.Metr
 	}
 
 	items := make([]coalesce.Item, 0, md.DataPointCount()*2)
+	metricHashes := make([]uint64, 0, md.MetricCount())
+	var scratch []string
 	rMetrics := md.ResourceMetrics()
 	for i := 0; i < rMetrics.Len(); i++ {
 		rm := rMetrics.At(i)
@@ -307,6 +309,9 @@ func (p *redactionProcessor) processMetrics(ctx context.Context, md pmetric.Metr
 			metrics := sm.Metrics()
 			for k := 0; k < metrics.Len(); k++ {
 				m := metrics.At(k)
+				var h uint64
+				h, scratch = metricDataPointsHash(m, scratch)
+				metricHashes = append(metricHashes, h)
 				items = append(items,
 					coalesce.Item{
 						Signal: "metrics",
@@ -327,23 +332,6 @@ func (p *redactionProcessor) processMetrics(ctx context.Context, md pmetric.Metr
 	}
 
 	p.telemetry.RecordInspected("metrics", len(items))
-
-	// Snapshot pre-redaction datapoint attribute hashes
-	metricHashes := make([]uint64, 0, md.MetricCount())
-	var scratch []string
-	for i := 0; i < rMetrics.Len(); i++ {
-		rm := rMetrics.At(i)
-		sMetrics := rm.ScopeMetrics()
-		for j := 0; j < sMetrics.Len(); j++ {
-			sm := sMetrics.At(j)
-			metrics := sm.Metrics()
-			for k := 0; k < metrics.Len(); k++ {
-				var h uint64
-				h, scratch = metricDataPointsHash(metrics.At(k), scratch)
-				metricHashes = append(metricHashes, h)
-			}
-		}
-	}
 
 	if err := p.coalescer.Submit(ctx, items); err != nil {
 		return err
@@ -459,7 +447,7 @@ func (p *redactionProcessor) collectValueCandidates(signal, key string, val pcom
 func (p *redactionProcessor) collectValueCandidatesWithMetric(signal, key string, val pcommon.Value, items *[]coalesce.Item, depth int, metricName string) {
 	if depth > maxNestingDepth {
 		p.telemetry.RecordSkipped("max_depth", 1)
-		if p.cfg.OnError == types.ErrorModeDrop {
+		if p.cfg.OnError == types.ErrorModeDrop && !p.cfg.DryRun {
 			p.scrubValue(signal, val)
 		}
 		return

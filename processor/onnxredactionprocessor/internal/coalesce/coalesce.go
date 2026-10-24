@@ -384,7 +384,8 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 				continue
 			}
 			if !utf8.ValidString(item.Text) {
-				if c.errorMode == types.ErrorModeDrop {
+				c.telemetry.RecordError("invalid_utf8")
+				if c.errorMode == types.ErrorModeDrop && !c.dryRun {
 					item.Target.Set(types.RedactedUninspected)
 					c.telemetry.RecordScrubbed(item.Signal, "invalid_utf8")
 				}
@@ -430,7 +431,8 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 		ids, offsets, err := c.tokenizer.Encode(prefix, a.TokenIDPool, a.OffsetPool)
 		if err != nil {
 			meta[idx].failed = true
-			if c.errorMode == types.ErrorModeDrop {
+			c.telemetry.RecordError("tokenizer_error")
+			if c.errorMode == types.ErrorModeDrop && !c.dryRun {
 				for _, trg := range a.Dedup.TargetsFor(idx) {
 					trg.Set(types.RedactedUninspected)
 					c.telemetry.RecordScrubbed(trg.Signal, "tokenizer_error")

@@ -743,12 +743,19 @@ type scrubRecorder struct {
 	noopTelemetry
 	mu       sync.Mutex
 	scrubbed []struct{ signal, reason string }
+	errors   []string
 }
 
 func (s *scrubRecorder) RecordScrubbed(signal, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.scrubbed = append(s.scrubbed, struct{ signal, reason string }{signal, reason})
+}
+
+func (s *scrubRecorder) RecordError(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errors = append(s.errors, reason)
 }
 
 func TestCoalescer_ScrubbedSignalAttribution(t *testing.T) {
@@ -833,4 +840,31 @@ func TestCoalescer_StructuredPanicLogging(t *testing.T) {
 	logs := observedLogs.FilterMessage("redaction batch panic recovered").All()
 	assert.Len(t, logs, 1)
 	assert.Equal(t, zapcore.ErrorLevel, logs[0].Level)
+}
+
+func TestCoalescer_DryRunPreservesInvalidUTF8AndTokenizerError(t *testing.T) {
+	pool := arena.NewPool(16, 32, 19)
+	rec := &scrubRecorder{}
+	chunker := window.NewChunker(32, 4, 16384)
+	bucketer := bucket.New([]int{32}, 16)
+	fakeDet := detect.NewFakeDetector()
+
+	c := New(5*time.Millisecond, 2, nil, &errTokenizer{}, chunker, bucketer, fakeDet, pool, 16384, types.ErrorModeDrop, true, WithTelemetry(rec))
+	defer func() { _ = c.Close() }()
+
+	badUTF8 := pcommon.NewValueStr("bad\xffutf8")
+	tokFail := pcommon.NewValueStr("valid text")
+
+	err := c.Submit(context.Background(), []Item{
+		{Signal: "logs", Text: badUTF8.Str(), Target: dedup.MutationTarget{Kind: dedup.TargetPCommonValue, Val: badUTF8, Signal: "logs"}},
+		{Signal: "logs", Text: tokFail.Str(), Target: dedup.MutationTarget{Kind: dedup.TargetPCommonValue, Val: tokFail, Signal: "logs"}},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "bad\xffutf8", badUTF8.Str())
+	assert.Equal(t, "valid text", tokFail.Str())
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	assert.Empty(t, rec.scrubbed, "dry_run must not record scrubbed strings or mutate values")
+	assert.ElementsMatch(t, []string{"invalid_utf8", "tokenizer_error"}, rec.errors, "dry_run must still record error metrics")
 }
