@@ -218,7 +218,6 @@ func TestWordPieceTokenizer_FastSlowDifferential(t *testing.T) {
 	}
 }
 
-
 func BenchmarkWordPieceTokenizer_Encode(b *testing.B) {
 	tok, err := NewWordPieceTokenizer(filepath.Join("..", "..", "testdata", "tokenizer.json"), "")
 	if err != nil {
@@ -238,4 +237,3 @@ func BenchmarkWordPieceTokenizer_Encode(b *testing.B) {
 		}
 	}
 }
-

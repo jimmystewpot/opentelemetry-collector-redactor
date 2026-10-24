@@ -218,6 +218,9 @@ func (t *wordPieceTokenizer) tokenizeWord(text string, wordStart, wordEnd int, d
 		dstRel := 0
 		for srcRel < rawLen {
 			textOffsets[dstRel] = uint8(srcRel)
+			if prefixLen+dstRel+utf8.UTFMax > len(buf) {
+				return t.tokenizeWordSlow(text, wordStart, wordEnd, dstIDs, dstOffsets)
+			}
 			r, sz := utf8.DecodeRuneInString(text[wordStart+srcRel : wordEnd])
 			rLow := unicode.ToLower(r)
 			encSz := utf8.EncodeRune(buf[prefixLen+dstRel:], rLow)
@@ -226,9 +229,6 @@ func (t *wordPieceTokenizer) tokenizeWord(text string, wordStart, wordEnd int, d
 			}
 			srcRel += sz
 			dstRel += encSz
-			if prefixLen+dstRel > len(buf) {
-				return t.tokenizeWordSlow(text, wordStart, wordEnd, dstIDs, dstOffsets)
-			}
 		}
 		textOffsets[dstRel] = uint8(srcRel)
 		lowercasedLen = dstRel

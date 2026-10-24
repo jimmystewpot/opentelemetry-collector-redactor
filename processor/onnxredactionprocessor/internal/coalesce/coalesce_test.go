@@ -834,4 +834,3 @@ func TestCoalescer_StructuredPanicLogging(t *testing.T) {
 	assert.Len(t, logs, 1)
 	assert.Equal(t, zapcore.ErrorLevel, logs[0].Level)
 }
-

@@ -329,7 +329,7 @@ func (p *redactionProcessor) processMetrics(ctx context.Context, md pmetric.Metr
 	p.telemetry.RecordInspected("metrics", len(items))
 
 	// Snapshot pre-redaction datapoint attribute hashes
-	var metricHashes []uint64
+	metricHashes := make([]uint64, 0, md.MetricCount())
 	var scratch []string
 	for i := 0; i < rMetrics.Len(); i++ {
 		rm := rMetrics.At(i)

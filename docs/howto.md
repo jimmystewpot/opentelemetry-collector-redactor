@@ -366,7 +366,7 @@ Set Prometheus alerts on the following key metrics:
   ort: checksum mismatch for model /etc/otel/models/tiny_ner.onnx: expected <sha>, got <sha>
   ```
 * **Root Cause:** The model file was modified, corrupted during download, or the configuration SHA-256 hash was not updated following model retraining.
-* **Resolution:** Recompute `sha256sum /etc/otel/models/model.onnx` and verify the integrity of the file before updating `config.yaml`.
+* **Resolution:** Recompute `sha256sum /etc/otel/models/tiny_ner.onnx` and verify the integrity of the file before updating `config.yaml`.
 
 #### Issue C: High In-Flight Metric Collisions
 

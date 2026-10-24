@@ -204,7 +204,9 @@ func (t *telemetry) Close() error {
 	if t == nil || t.reg == nil {
 		return nil
 	}
-	return t.reg.Unregister()
+	err := t.reg.Unregister()
+	t.reg = nil
+	return err
 }
 
 func (t *telemetry) RecordBatch(coalescedStrings int) {

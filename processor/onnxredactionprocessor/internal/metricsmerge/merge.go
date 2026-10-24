@@ -266,6 +266,9 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 	return stats
 }
 
+// mergeExpBuckets merges exponential histogram bucket counts from src into dst
+// when scales are identical, expanding the destination bucket range to [minOffset, maxEnd)
+// if bucket offsets or lengths differ.
 func mergeExpBuckets(dst, src pmetric.ExponentialHistogramDataPointBuckets) {
 	srcLen := src.BucketCounts().Len()
 	if srcLen == 0 {
