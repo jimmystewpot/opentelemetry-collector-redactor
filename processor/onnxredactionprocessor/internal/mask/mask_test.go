@@ -251,3 +251,43 @@ func TestWidenJSONEscapes_Direct(t *testing.T) {
 	assert.Equal(t, 2, s4)
 	assert.Equal(t, 13, e4)
 }
+
+func TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths(t *testing.T) {
+	// 1. Two non-overlapping raw spans meeting inside \u0020 (or \") where widening overlaps:
+	// Span 1 ends at '0' inside \u0020 (uIdx+3 -> Rule 3 widens end to uIdx+6),
+	// Span 2 starts at '0' inside \u0020 (uIdx+3 -> Rule 1 widens start to uIdx).
+	jsonAdj := `{"pair": "Alice\u0020bob@example.com"}`
+	uIdx := strings.Index(jsonAdj, `\u0020`)
+	sAlice := types.EntitySpan{
+		Start:      strings.Index(jsonAdj, "Alice"),
+		End:        uIdx + 3,
+		Label:      types.LabelPerson,
+		Confidence: 0.95,
+	}
+	sBob := types.EntitySpan{
+		Start:      uIdx + 3,
+		End:        strings.Index(jsonAdj, "bob@example.com") + len("bob@example.com"),
+		Label:      types.LabelEmail,
+		Confidence: 0.95,
+	}
+	outAdj, err := Mask(jsonAdj, []types.EntitySpan{sAlice, sBob}, 16384, types.ErrorModeDrop, nil)
+	require.NoError(t, err, "post-widening overlap between non-overlapping raw spans must be clamped, not rejected")
+	assert.Contains(t, outAdj, "[REDACTED_PERSON]")
+	assert.Contains(t, outAdj, "[REDACTED_EMAIL]")
+	assert.True(t, json.Valid([]byte(outAdj)), "masked output must remain valid JSON: %s", outAdj)
+
+	// 2. Windows path with \u directory segment that is not hex \uXXXX
+	winPath := `C:\u1\alice\secret.txt`
+	sUser := spanOf(winPath, "alice", types.LabelPathUser)
+	outWin, err := Mask(winPath, []types.EntitySpan{sUser}, 16384, types.ErrorModeDrop, nil)
+	require.NoError(t, err)
+	assert.Equal(t, `C:\u1\[REDACTED_PATH_USER]\secret.txt`, outWin)
+
+	// 3. Escaped backslash before u0041 (\\u0041 is literal \ followed by u0041, not a unicode escape)
+	escapedBackslash := `C:\\u0041\alice`
+	sEsc := spanOf(escapedBackslash, "u0041", types.LabelPathUser)
+	sEsc.Start++ // Start at '0' (inside u0041) to verify \\u0041 is not widened across the escaped backslash
+	outEsc, err := Mask(escapedBackslash, []types.EntitySpan{sEsc}, 16384, types.ErrorModeDrop, nil)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(outEsc, `C:\\u`), "escaped backslash must not be treated as \\uXXXX: %s", outEsc)
+}

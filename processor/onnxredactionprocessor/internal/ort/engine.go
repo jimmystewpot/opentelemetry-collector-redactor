@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
@@ -33,10 +34,16 @@ type Engine struct {
 	session     unsafe.Pointer
 	runOptsPool chan unsafe.Pointer
 	decoder     *decode.Decoder
-	mu          sync.Mutex
+	warmupArena *arena.BatchArena
+	mu          sync.RWMutex
 }
 
 var _ detect.Detector = (*Engine)(nil)
+
+var (
+	initOnce sync.Once
+	initErr  error
+)
 
 // NewEngine creates and initializes an ONNX Runtime inference session with checksum validation.
 func NewEngine(modelPath, expectedSHA string, intraOpThreads, concurrentRuns int, allowSpinning bool, dec *decode.Decoder) (*Engine, error) {
@@ -53,6 +60,22 @@ func NewEngine(modelPath, expectedSHA string, intraOpThreads, concurrentRuns int
 			return nil, fmt.Errorf("ort: checksum mismatch for model %s: expected %s, got %s",
 				cleanPath, expectedSHA, actualSHA)
 		}
+	}
+
+	initOnce.Do(func() {
+		var cErr *C.char
+		rc := C.ort_shim_init(&cErr)
+		if rc != 0 {
+			errMsg := "unknown error"
+			if cErr != nil {
+				errMsg = C.GoString(cErr)
+				C.ort_shim_free_string(cErr)
+			}
+			initErr = fmt.Errorf("ort: failed to initialize runtime: %s", errMsg)
+		}
+	})
+	if initErr != nil {
+		return nil, initErr
 	}
 
 	cPath := C.CString(cleanPath)
@@ -111,12 +134,15 @@ func NewEngine(modelPath, expectedSHA string, intraOpThreads, concurrentRuns int
 		runOptsPool <- opt
 	}
 
+	warmArena := arena.NewPool(1, 2, 64).Acquire()
+
 	return &Engine{
 		modelPath:   cleanPath,
 		env:         cEnv,
 		session:     cSession,
 		runOptsPool: runOptsPool,
 		decoder:     dec,
+		warmupArena: warmArena,
 	}, nil
 }
 
@@ -142,7 +168,6 @@ func (e *Engine) Close() error {
 
 // Warmup runs a minimal dummy inference pass through the model to trigger execution provider initialization.
 func (e *Engine) Warmup(ctx context.Context) error {
-	a := arena.NewPool(1, 16, 19).Acquire()
 	w := types.TokenWindow{
 		ParentUniqueIdx: 0,
 		TokenIDs:        []int64{101, 102},
@@ -152,21 +177,20 @@ func (e *Engine) Warmup(ctx context.Context) error {
 		MaxSeqLen: 2,
 		Windows:   []types.TokenWindow{w},
 	}
-	_, err := e.DetectBatch(ctx, batch, a)
+	_, err := e.DetectBatch(ctx, batch, e.warmupArena)
 	return err
 }
 
 // DetectBatch executes native ONNX inference over a bucketed batch and returns decoded EntitySpans.
 func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *arena.BatchArena) ([][]types.EntitySpan, error) {
-	if len(batch.Windows) == 0 {
+	if len(batch.Windows) == 0 || batch.MaxSeqLen <= 0 {
 		return nil, nil
 	}
-	e.mu.Lock()
+	e.mu.RLock()
 	if e.session == nil {
-		e.mu.Unlock()
+		e.mu.RUnlock()
 		return nil, errors.New("ort: session is closed")
 	}
-	e.mu.Unlock()
 
 	var runOpts unsafe.Pointer
 	select {
@@ -175,6 +199,7 @@ func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *
 		var cErr *C.char
 		rc := C.ort_shim_create_run_options(&runOpts, &cErr)
 		if rc != 0 {
+			e.mu.RUnlock()
 			errMsg := "unknown error"
 			if cErr != nil {
 				errMsg = C.GoString(cErr)
@@ -185,24 +210,19 @@ func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *
 	}
 	defer func() {
 		C.ort_shim_unset_terminate(runOpts)
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		if e.session == nil {
-			C.ort_shim_release_run_options(runOpts)
-			return
-		}
 		select {
 		case e.runOptsPool <- runOpts:
 		default:
 			C.ort_shim_release_run_options(runOpts)
 		}
+		e.mu.RUnlock()
 	}()
 
 	batchSize := len(batch.Windows)
 	seqLen := batch.MaxSeqLen
 	totalElements := batchSize * seqLen
 
-	if cap(a.InputIDs) < totalElements || cap(a.AttentionMask) < totalElements {
+	if cap(a.InputIDs) < totalElements || cap(a.AttentionMask) < totalElements || cap(a.Logits) == 0 {
 		return nil, fmt.Errorf("ort: arena capacity %d is insufficient for batchSize=%d, seqLen=%d (%d)",
 			cap(a.InputIDs), batchSize, seqLen, totalElements)
 	}
@@ -223,21 +243,25 @@ func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *
 	}
 
 	// Cooperative cancellation monitor
-	done := make(chan struct{})
-	monitorDone := make(chan struct{})
+	var done, monitorDone chan struct{}
+	if ctx.Done() != nil {
+		done = make(chan struct{})
+		monitorDone = make(chan struct{})
 
-	go func() {
-		defer close(monitorDone)
-		select {
-		case <-ctx.Done():
-			C.ort_shim_terminate(runOpts)
-		case <-done:
-		}
-	}()
+		go func() {
+			defer close(monitorDone)
+			select {
+			case <-ctx.Done():
+				C.ort_shim_terminate(runOpts)
+			case <-done:
+			}
+		}()
+	}
 
 	var cErr *C.char
 	var outNumClasses C.int64_t = 19
 	outLogitsCap := C.int64_t(cap(a.Logits))
+	a.Logits = a.Logits[:cap(a.Logits)]
 
 	inIDsPtr := (*C.int64_t)(unsafe.Pointer(&a.InputIDs[0]))
 	attnMaskPtr := (*C.int64_t)(unsafe.Pointer(&a.AttentionMask[0]))
@@ -255,10 +279,13 @@ func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *
 		&outNumClasses,
 		&cErr,
 	)
+	runtime.KeepAlive(a)
 
 	// Ensure monitor goroutine has exited before unsetting terminate flag
-	close(done)
-	<-monitorDone
+	if monitorDone != nil {
+		close(done)
+		<-monitorDone
+	}
 
 	if ctx.Err() != nil {
 		if cErr != nil {
@@ -282,13 +309,20 @@ func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *
 
 	// Decode logits into spans per window
 	results := make([][]types.EntitySpan, batchSize)
+	a.SpanScratch = a.SpanScratch[:0]
 	for i, w := range batch.Windows {
 		logitsStart := i * seqLen * numClasses
 		logitsEnd := logitsStart + seqLen*numClasses
 		windowLogits := a.Logits[logitsStart:logitsEnd]
 
 		if e.decoder != nil {
-			results[i] = e.decoder.DecodeWindow(windowLogits, numClasses, w.Offsets, nil)
+			startIdx := len(a.SpanScratch)
+			dst := a.SpanScratch[startIdx:startIdx]
+			decoded := e.decoder.DecodeWindow(windowLogits, numClasses, w.Offsets, dst)
+			results[i] = decoded
+			if cap(a.SpanScratch)-startIdx >= len(decoded) {
+				a.SpanScratch = a.SpanScratch[:startIdx+len(decoded)]
+			}
 		}
 	}
 

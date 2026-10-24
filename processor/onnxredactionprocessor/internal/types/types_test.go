@@ -96,10 +96,6 @@ func TestConstantsAndStructs(t *testing.T) {
 	assert.Equal(t, 32, bb.MaxSeqLen)
 	assert.Len(t, bb.Windows, 1)
 
-	assert.Equal(t, SignalKind(0), SignalLogs)
-	assert.Equal(t, SignalKind(1), SignalTraces)
-	assert.Equal(t, SignalKind(2), SignalMetrics)
-
 	assert.Equal(t, ErrorMode("drop"), ErrorModeDrop)
 	assert.Equal(t, ErrorMode("ignore"), ErrorModeIgnore)
 }

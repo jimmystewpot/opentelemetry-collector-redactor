@@ -169,3 +169,18 @@ func TestDecode_EdgeCasesAndCoverage(t *testing.T) {
 	assert.Equal(t, 0, mEncomp[0].Start)
 	assert.Equal(t, 20, mEncomp[0].End)
 }
+
+func TestDecodeWindow_MoreClassesThanConfigured(t *testing.T) {
+	// Decoder configured with only 3 classes ("O", "B-PERSON", "I-PERSON"),
+	// but model outputs 25 classes with class 24 having highest logit.
+	d := NewDecoder([]string{"O", "B-PERSON", "I-PERSON"}, nil, 0.85)
+	numClasses := 25
+	logits := make([]float32, numClasses)
+	logits[24] = 20.0 // out of range of d.classToLabel (len 3)
+	offsets := []types.Offset{{Start: 0, End: 5}}
+
+	require.NotPanics(t, func() {
+		spans := d.DecodeWindow(logits, numClasses, offsets, nil)
+		assert.Empty(t, spans)
+	})
+}

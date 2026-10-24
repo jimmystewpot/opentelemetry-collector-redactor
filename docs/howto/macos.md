@@ -17,7 +17,7 @@ All terminology and spelling in this document adhere to Australian English.
    ```bash
    xcode-select --install
    ```
-2. **Go Compiler (1.22+):**
+2. **Go Compiler (1.27+):**
    ```bash
    brew install go
    ```
@@ -140,7 +140,39 @@ The collector starts listening on:
 ## 5. Verification & Local Inspection
 
 ### Sending Test Telemetry via HTTP
-Send a sample log payload containing identifiable PII to the collector:
+
+When testing the collector locally, the expected payload depends on the model configuration:
+
+#### 1. Synthetic Test Fixture (`testdata/tiny_ner.onnx`)
+When running with the bundled synthetic test fixture (`testdata/tiny_ner.onnx`), the deterministic trigger tokens `tokenbperson`, `tokenbemail`, and `/Users/tokenbpathuser/.ssh/id_rsa` demonstrate live redaction:
+
+```bash
+curl -i -X POST http://localhost:4318/v1/logs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resourceLogs": [{
+      "resource": {
+        "attributes": [{"key": "service.name", "value": {"stringValue": "checkout-service"}}]
+      },
+      "scopeLogs": [{
+        "logRecords": [{
+          "timeUnixNano": "1700000000000000000",
+          "body": {"stringValue": "User tokenbperson (tokenbemail) encountered error at /Users/tokenbpathuser/.ssh/id_rsa"},
+          "attributes": [{"key": "user.email", "value": {"stringValue": "tokenbemail"}}]
+        }]
+      }]
+    }]
+  }'
+```
+
+Verify that the output console shows redacted strings:
+- `tokenbperson` -> `[REDACTED_PERSON]`
+- `tokenbemail` -> `[REDACTED_EMAIL]`
+- `/Users/tokenbpathuser/.ssh/id_rsa` -> `/Users/[REDACTED_PATH_USER]/.ssh/id_rsa`
+
+#### 2. Production Natural-Language Model
+Natural-language inputs (`Alice Smith`, `alice@example.com`, and `/Users/asmith/.ssh/id_rsa`) require loading a fine-tuned model exported via `scripts/export_and_quantize.py`:
+
 ```bash
 curl -i -X POST http://localhost:4318/v1/logs \
   -H "Content-Type: application/json" \

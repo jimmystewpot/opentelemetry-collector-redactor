@@ -50,6 +50,7 @@ int ort_shim_create_session(
     void** out_run_options,
     char** out_err
 ) {
+    (void)concurrent_runs;
     if (ort_shim_init(out_err) != 0) {
         return -1;
     }
@@ -169,8 +170,8 @@ int ort_shim_run_batch(
     int64_t* out_num_classes,
     char** out_err
 ) {
-    if (!g_ort || !session || !input_ids || !attention_mask || !out_logits) {
-        if (out_err) *out_err = strdup("ort_shim: invalid null arguments passed to run_batch");
+    if (!g_ort || !session || !input_ids || !attention_mask || !out_logits || batch_size <= 0 || seq_len <= 0 || out_logits_cap <= 0) {
+        if (out_err) *out_err = strdup("ort_shim: invalid arguments passed to run_batch");
         return -1;
     }
 
@@ -258,29 +259,64 @@ int ort_shim_run_batch(
         return -1;
     }
 
+    ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    st = g_ort->GetTensorElementType(shape_info, &elem_type);
+    if (st) {
+        if (out_err) *out_err = strdup(g_ort->GetErrorMessage(st));
+        g_ort->ReleaseStatus(st);
+        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        g_ort->ReleaseValue(out_tensors[0]);
+        return -1;
+    }
+    if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        g_ort->ReleaseValue(out_tensors[0]);
+        if (out_err) *out_err = strdup("ort_shim: output tensor element type is not float32");
+        return -1;
+    }
+
     size_t num_dims = 0;
     st = g_ort->GetDimensionsCount(shape_info, &num_dims);
-    if (st) g_ort->ReleaseStatus(st);
+    if (st) {
+        if (out_err) *out_err = strdup(g_ort->GetErrorMessage(st));
+        g_ort->ReleaseStatus(st);
+        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        g_ort->ReleaseValue(out_tensors[0]);
+        return -1;
+    }
+
     int64_t dims[3] = {0};
-    if (num_dims > 3) num_dims = 3;
-    st = g_ort->GetDimensions(shape_info, dims, num_dims);
-    if (st) g_ort->ReleaseStatus(st);
+    if (num_dims == 3) {
+        st = g_ort->GetDimensions(shape_info, dims, 3);
+        if (st) {
+            if (out_err) *out_err = strdup(g_ort->GetErrorMessage(st));
+            g_ort->ReleaseStatus(st);
+            g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+            g_ort->ReleaseValue(out_tensors[0]);
+            return -1;
+        }
+    }
+
+    if (num_dims != 3 || dims[0] != batch_size || dims[1] != seq_len || dims[2] <= 0) {
+        g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
+        g_ort->ReleaseValue(out_tensors[0]);
+        if (out_err) *out_err = strdup("ort_shim: unexpected output tensor dimensions");
+        return -1;
+    }
+
     g_ort->ReleaseTensorTypeAndShapeInfo(shape_info);
 
-    int64_t num_classes = 19;
-    if (num_dims >= 3) {
-        num_classes = dims[2];
-    }
+    int64_t num_classes = dims[2];
     if (out_num_classes) {
         *out_num_classes = num_classes;
     }
 
-    int64_t total_elements = batch_size * seq_len * num_classes;
-    if (total_elements > out_logits_cap) {
+    if (num_classes > out_logits_cap / (batch_size * seq_len)) {
         g_ort->ReleaseValue(out_tensors[0]);
         if (out_err) *out_err = strdup("ort_shim: output logits buffer capacity exceeded");
         return -1;
     }
+    int64_t total_elements = batch_size * seq_len * num_classes;
 
     float* tensor_data = NULL;
     st = g_ort->GetTensorMutableData(out_tensors[0], (void**)&tensor_data);

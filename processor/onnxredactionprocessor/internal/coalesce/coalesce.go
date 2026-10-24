@@ -8,6 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"go.uber.org/zap"
+
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/arena"
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/bucket"
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/decode"
@@ -87,6 +89,21 @@ func WithConcurrentRuns(n int) Option {
 	}
 }
 
+// WithAllowedLabels filters detected entity spans to only labels enabled in the mask.
+func WithAllowedLabels(allowed [10]bool) Option {
+	return func(c *Coalescer) {
+		c.allowedLabels = allowed
+		c.hasAllowedLabels = true
+	}
+}
+
+// WithLogger sets the logger for the coalescer.
+func WithLogger(logger *zap.Logger) Option {
+	return func(c *Coalescer) {
+		c.logger = logger
+	}
+}
+
 type callerRequest struct {
 	ctx         context.Context
 	items       []Item
@@ -99,19 +116,22 @@ type callerRequest struct {
 // Coalescer aggregates concurrent string redaction submissions over a sliding
 // time window up to a maximum batch size, executing inference as a unified batch.
 type Coalescer struct {
-	window          time.Duration
-	maxStrings      int
-	filter          *filter.AttributeFilter
-	tokenizer       tokenizer.Tokenizer
-	chunker         *window.Chunker
-	bucketer        *bucket.Bucketer
-	detector        detect.Detector
-	arenaPool       *arena.Pool
-	maxPayloadBytes int
-	errorMode       types.ErrorMode
-	dryRun          bool
-	timeout         time.Duration
-	telemetry       TelemetryRecorder
+	window           time.Duration
+	maxStrings       int
+	filter           *filter.AttributeFilter
+	tokenizer        tokenizer.Tokenizer
+	chunker          *window.Chunker
+	bucketer         *bucket.Bucketer
+	detector         detect.Detector
+	arenaPool        *arena.Pool
+	maxPayloadBytes  int
+	errorMode        types.ErrorMode
+	dryRun           bool
+	timeout          time.Duration
+	telemetry        TelemetryRecorder
+	allowedLabels    [10]bool
+	hasAllowedLabels bool
+	logger           *zap.Logger
 
 	mu           sync.Mutex
 	pending      []*callerRequest
@@ -285,6 +305,9 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 	defer c.activeWG.Done()
 	defer func() {
 		if r := recover(); r != nil {
+			if c.logger != nil {
+				c.logger.Error("redaction batch panic recovered", zap.Any("panic", r), zap.Stack("stacktrace"))
+			}
 			c.telemetry.RecordError("panic")
 			panicErr := fmt.Errorf("redaction batch panic: %v", r)
 			for _, req := range batch {
@@ -301,7 +324,7 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 		}
 	}()
 
-	var activeRequests []*callerRequest
+	activeRequests := make([]*callerRequest, 0, len(batch))
 	for _, req := range batch {
 		if !req.removed {
 			activeRequests = append(activeRequests, req)
@@ -361,13 +384,18 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 				continue
 			}
 			if !utf8.ValidString(item.Text) {
-				if c.errorMode == types.ErrorModeDrop {
+				c.telemetry.RecordError("invalid_utf8")
+				if c.errorMode == types.ErrorModeDrop && !c.dryRun {
 					item.Target.Set(types.RedactedUninspected)
 					c.telemetry.RecordScrubbed(item.Signal, "invalid_utf8")
 				}
 				continue
 			}
-			a.Dedup.Add(item.Text, item.Target)
+			trg := item.Target
+			if trg.Signal == "" && item.Signal != "" {
+				trg.Signal = item.Signal
+			}
+			a.Dedup.Add(item.Text, trg)
 		}
 	}
 
@@ -403,11 +431,12 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 		ids, offsets, err := c.tokenizer.Encode(prefix, a.TokenIDPool, a.OffsetPool)
 		if err != nil {
 			meta[idx].failed = true
-			if c.errorMode == types.ErrorModeDrop {
+			c.telemetry.RecordError("tokenizer_error")
+			if c.errorMode == types.ErrorModeDrop && !c.dryRun {
 				for _, trg := range a.Dedup.TargetsFor(idx) {
 					trg.Set(types.RedactedUninspected)
+					c.telemetry.RecordScrubbed(trg.Signal, "tokenizer_error")
 				}
-				c.telemetry.RecordScrubbed("", "tokenizer_error")
 			}
 			continue
 		}
@@ -450,18 +479,13 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 			stopMonitor := make(chan struct{})
 			go func() {
 				defer cancel()
-				ticker := time.NewTicker(2 * time.Millisecond)
-				defer ticker.Stop()
-				for {
+				for _, req := range activeRequests {
 					select {
 					case <-stopMonitor:
 						return
 					case <-ctx.Done():
 						return
-					case <-ticker.C:
-						if !anyCallerAlive() {
-							return
-						}
+					case <-req.ctx.Done():
 					}
 				}
 			}()
@@ -487,7 +511,15 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 			for wIdx, w := range b.Windows {
 				pIdx := w.ParentUniqueIdx
 				if wIdx < len(spansSlice) && len(spansSlice[wIdx]) > 0 {
-					parentSpans[pIdx] = append(parentSpans[pIdx], spansSlice[wIdx]...)
+					if c.hasAllowedLabels {
+						for _, s := range spansSlice[wIdx] {
+							if int(s.Label) < len(c.allowedLabels) && c.allowedLabels[s.Label] {
+								parentSpans[pIdx] = append(parentSpans[pIdx], s)
+							}
+						}
+					} else {
+						parentSpans[pIdx] = append(parentSpans[pIdx], spansSlice[wIdx]...)
+					}
 				}
 			}
 		}
@@ -496,11 +528,10 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 
 	// 4. Decode & Merge Spans
 	tDecode := time.Now()
-	mergedSpans := make([][]types.EntitySpan, len(uniqueStrings))
 	for idx := range uniqueStrings {
 		if len(parentSpans[idx]) > 0 {
-			mergedSpans[idx] = decode.MergeSpans(parentSpans[idx])
-			for _, s := range mergedSpans[idx] {
+			parentSpans[idx] = decode.MergeSpans(parentSpans[idx])
+			for _, s := range parentSpans[idx] {
 				c.telemetry.RecordEntity(s.Label)
 			}
 		}
@@ -513,7 +544,7 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 		if meta[idx].failed {
 			continue
 		}
-		spans := mergedSpans[idx]
+		spans := parentSpans[idx]
 
 		if c.dryRun {
 			continue
@@ -523,15 +554,17 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 		if err != nil {
 			if c.errorMode == types.ErrorModeDrop {
 				maskedText = types.RedactedUninspected
-				c.telemetry.RecordScrubbed("", "mask_error")
 			} else {
 				maskedText = text
 			}
-		} else if meta[idx].hasTail && c.errorMode == types.ErrorModeDrop {
-			c.telemetry.RecordScrubbed("", "oversize_tail")
 		}
 
 		for _, trg := range a.Dedup.TargetsFor(idx) {
+			if err != nil && c.errorMode == types.ErrorModeDrop {
+				c.telemetry.RecordScrubbed(trg.Signal, "mask_error")
+			} else if meta[idx].hasTail && c.errorMode == types.ErrorModeDrop {
+				c.telemetry.RecordScrubbed(trg.Signal, "oversize_tail")
+			}
 			trg.Set(maskedText)
 			if trg.MetricName != "" && maskedText != text {
 				c.telemetry.RecordMetricLabelPII(trg.MetricName, 1)

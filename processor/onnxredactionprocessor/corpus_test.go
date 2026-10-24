@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,15 +43,22 @@ type corpusSample struct {
 }
 
 type corpusDetector struct {
+	mu            sync.Mutex
 	expectedSpans map[string][]types.EntitySpan
+	recordedSpans map[string][]types.EntitySpan
 }
 
 func (c *corpusDetector) DetectBatch(_ context.Context, batch types.BucketedBatch, a *arena.BatchArena) ([][]types.EntitySpan, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	res := make([][]types.EntitySpan, len(batch.Windows))
 	for i, w := range batch.Windows {
 		parentText := a.Dedup.UniqueStrings()[w.ParentUniqueIdx]
 		if spans, ok := c.expectedSpans[parentText]; ok {
 			res[i] = append(res[i], spans...)
+			if c.recordedSpans != nil {
+				c.recordedSpans[parentText] = spans
+			}
 		}
 	}
 	return res, nil
@@ -102,7 +110,10 @@ func TestCorpus_GoldenGatedPrecisionRecall(t *testing.T) {
 		}
 	}
 
-	det := &corpusDetector{expectedSpans: expectedMap}
+	det := &corpusDetector{
+		expectedSpans: expectedMap,
+		recordedSpans: make(map[string][]types.EntitySpan),
+	}
 	cfg := createDefaultConfig().(*Config)
 	cfg.Inference.CoalesceWindow = 5 * time.Millisecond
 	cfg.Filtering.MinStringLength = 1
@@ -111,6 +122,28 @@ func TestCorpus_GoldenGatedPrecisionRecall(t *testing.T) {
 	proc, err := newTestProcessor(cfg, det)
 	require.NoError(t, err)
 	defer func() { _ = proc.Shutdown(context.Background()) }()
+
+	// Feed each positive sample through ConsumeLogs
+	for _, p := range positives {
+		ld := plog.NewLogs()
+		rec := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+		rec.Body().SetStr(p.Text)
+		err := proc.ConsumeLogs(context.Background(), ld)
+		require.NoError(t, err)
+		outBody := rec.Body().Str()
+		assert.NotEqual(t, p.Text, outBody, "positive log body should be mutated: %s", p.Text)
+	}
+
+	// Feed each negative sample through ConsumeLogs
+	for _, n := range negatives {
+		ld := plog.NewLogs()
+		rec := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+		rec.Body().SetStr(n.Text)
+		err := proc.ConsumeLogs(context.Background(), ld)
+		require.NoError(t, err)
+		outBody := rec.Body().Str()
+		assert.Equal(t, n.Text, outBody, "negative log body should not be mutated: %s", n.Text)
+	}
 
 	// Tier definitions
 	tier1Labels := map[types.Label]bool{
@@ -132,7 +165,9 @@ func TestCorpus_GoldenGatedPrecisionRecall(t *testing.T) {
 	var tp2, fp2, fn2 int
 
 	for _, p := range positives {
-		detected := expectedMap[p.Text]
+		det.mu.Lock()
+		detected := det.recordedSpans[p.Text]
+		det.mu.Unlock()
 		expected := p.Spans
 
 		matchedExpected := make([]bool, len(expected))
@@ -186,7 +221,9 @@ func TestCorpus_GoldenGatedPrecisionRecall(t *testing.T) {
 
 	// Verify Negative Set: 0 False Positives
 	for _, n := range negatives {
-		detected := expectedMap[n.Text]
+		det.mu.Lock()
+		detected := det.recordedSpans[n.Text]
+		det.mu.Unlock()
 		assert.Empty(t, detected, "negative sample should not produce entities: %s", n.Text)
 	}
 }
