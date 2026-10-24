@@ -1,7 +1,9 @@
 package metricsmerge
 
 import (
+	"slices"
 	"sort"
+	"strconv"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
@@ -32,6 +34,8 @@ func ComputeCanonicalAttrHash(attrs pcommon.Map, keyScratch []string) (uint64, [
 
 	h := uint64(fnvOffset64)
 	for _, k := range keyScratch {
+		h ^= uint64(len(k))
+		h *= fnvPrime64
 		for i := 0; i < len(k); i++ {
 			h ^= uint64(k[i])
 			h *= fnvPrime64
@@ -40,10 +44,48 @@ func ComputeCanonicalAttrHash(attrs pcommon.Map, keyScratch []string) (uint64, [
 		h *= fnvPrime64
 
 		if v, ok := attrs.Get(k); ok {
-			s := v.AsString()
-			for i := 0; i < len(s); i++ {
-				h ^= uint64(s[i])
+			h ^= uint64(v.Type()) //nolint:gosec // ValueType is a small non-negative enum
+			h *= fnvPrime64
+			switch v.Type() {
+			case pcommon.ValueTypeStr:
+				s := v.Str()
+				h ^= uint64(len(s))
 				h *= fnvPrime64
+				for i := 0; i < len(s); i++ {
+					h ^= uint64(s[i])
+					h *= fnvPrime64
+				}
+			case pcommon.ValueTypeInt:
+				var numBuf [24]byte
+				b := strconv.AppendInt(numBuf[:0], v.Int(), 10)
+				h ^= uint64(len(b))
+				h *= fnvPrime64
+				for i := 0; i < len(b); i++ {
+					h ^= uint64(b[i])
+					h *= fnvPrime64
+				}
+			case pcommon.ValueTypeDouble:
+				var numBuf [32]byte
+				b := strconv.AppendFloat(numBuf[:0], v.Double(), 'g', -1, 64)
+				h ^= uint64(len(b))
+				h *= fnvPrime64
+				for i := 0; i < len(b); i++ {
+					h ^= uint64(b[i])
+					h *= fnvPrime64
+				}
+			case pcommon.ValueTypeBool:
+				if v.Bool() {
+					h ^= 1
+				}
+				h *= fnvPrime64
+			default:
+				s := v.AsString()
+				h ^= uint64(len(s))
+				h *= fnvPrime64
+				for i := 0; i < len(s); i++ {
+					h ^= uint64(s[i])
+					h *= fnvPrime64
+				}
 			}
 		}
 		h ^= ';'
@@ -163,6 +205,8 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 				target.SetCount(target.Count() + dp.Count())
 				if target.HasSum() && dp.HasSum() {
 					target.SetSum(target.Sum() + dp.Sum())
+				} else if !target.HasSum() && dp.HasSum() {
+					target.SetSum(dp.Sum())
 				}
 				if dp.HasMin() {
 					if !target.HasMin() || dp.Min() < target.Min() {
@@ -175,7 +219,8 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 					}
 				}
 
-				if target.BucketCounts().Len() == dp.BucketCounts().Len() {
+				if target.BucketCounts().Len() == dp.BucketCounts().Len() &&
+					slices.Equal(target.ExplicitBounds().AsRaw(), dp.ExplicitBounds().AsRaw()) {
 					for b := 0; b < target.BucketCounts().Len(); b++ {
 						target.BucketCounts().SetAt(b, target.BucketCounts().At(b)+dp.BucketCounts().At(b))
 					}
@@ -234,6 +279,8 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 				target.SetCount(target.Count() + dp.Count())
 				if target.HasSum() && dp.HasSum() {
 					target.SetSum(target.Sum() + dp.Sum())
+				} else if !target.HasSum() && dp.HasSum() {
+					target.SetSum(dp.Sum())
 				}
 				if dp.HasMin() {
 					if !target.HasMin() || dp.Min() < target.Min() {

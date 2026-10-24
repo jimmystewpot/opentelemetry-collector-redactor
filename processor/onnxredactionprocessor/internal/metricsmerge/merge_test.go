@@ -334,3 +334,52 @@ func TestResolveCollisions_GaugeOlderTimestamp(t *testing.T) {
 	assert.Equal(t, 100.0, gauge.DataPoints().At(0).DoubleValue())
 	assert.Equal(t, ts1, gauge.DataPoints().At(0).Timestamp())
 }
+
+func TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds(t *testing.T) {
+	// 1. Delimiter collision resistance: {"a": "b;c=d"} vs {"a": "b", "c": "d"}
+	m1 := pcommon.NewMap()
+	m1.PutStr("a", "b;c=d")
+	m2 := pcommon.NewMap()
+	m2.PutStr("a", "b")
+	m2.PutStr("c", "d")
+
+	var scratch []string
+	h1, scratch := ComputeCanonicalAttrHash(m1, scratch)
+	h2, _ := ComputeCanonicalAttrHash(m2, scratch)
+	assert.NotEqual(t, h1, h2, "maps with embedded '=' and ';' delimiters must not collide")
+
+	// 2. Type collision resistance: {"a": "123"} vs {"a": 123}
+	mStr := pcommon.NewMap()
+	mStr.PutStr("a", "123")
+	mInt := pcommon.NewMap()
+	mInt.PutInt("a", 123)
+	hStr, scratch := ComputeCanonicalAttrHash(mStr, scratch)
+	hInt, _ := ComputeCanonicalAttrHash(mInt, scratch)
+	assert.NotEqual(t, hStr, hInt, "string attribute '123' and int attribute 123 must not collide")
+
+	// 3. Histogram with mismatched ExplicitBounds must not sum BucketCounts
+	metric := pmetric.NewMetric()
+	hist := metric.SetEmptyHistogram()
+	ts := pcommon.Timestamp(1000)
+
+	dp1 := hist.DataPoints().AppendEmpty()
+	dp1.Attributes().PutStr("k", "v")
+	dp1.SetTimestamp(ts)
+	dp1.ExplicitBounds().FromRaw([]float64{10, 100})
+	dp1.BucketCounts().FromRaw([]uint64{1, 2, 3})
+	// dp1 has no Sum set
+
+	dp2 := hist.DataPoints().AppendEmpty()
+	dp2.Attributes().PutStr("k", "v")
+	dp2.SetTimestamp(ts)
+	dp2.ExplicitBounds().FromRaw([]float64{50, 500}) // different bounds!
+	dp2.BucketCounts().FromRaw([]uint64{4, 5, 6})
+	dp2.SetSum(42.0)
+
+	ResolveCollisions(metric)
+	require.Equal(t, 1, hist.DataPoints().Len())
+	merged := hist.DataPoints().At(0)
+	assert.Equal(t, []uint64{1, 2, 3}, merged.BucketCounts().AsRaw(), "mismatched explicit bounds must not sum bucket counts")
+	assert.True(t, merged.HasSum())
+	assert.Equal(t, 42.0, merged.Sum(), "Sum from second datapoint must be preserved when first datapoint has no Sum")
+}

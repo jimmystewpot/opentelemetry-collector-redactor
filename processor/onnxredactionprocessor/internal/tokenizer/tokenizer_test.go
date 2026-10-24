@@ -301,7 +301,11 @@ func TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange(t *testing.T) {
 	text := "prefix " + word + " suffix"
 	ids, offsets, err := tok.Encode(text, nil, nil)
 	require.NoError(t, err)
-	require.NotEmpty(t, ids)
+	require.Greater(t, len(ids), 4)
+	assert.Equal(t, int64(300), ids[2], "first subword of word must match lowercased 'i' (300), not [UNK]")
+	assert.Equal(t, int64(301), ids[3], "second subword of word must match '##a' (301)")
+	assert.Equal(t, types.Offset{Start: 7, End: 9}, offsets[2], "2-byte 'İ' at text[7:9] must map to [7,9], not [7,8]")
+	assert.Equal(t, types.Offset{Start: 9, End: 10}, offsets[3], "first 'a' after 'İ' must map to [9,10], not [8,9]")
 	for _, off := range offsets {
 		assert.True(t, utf8.ValidString(text[off.Start:off.End]), "offset [%d:%d] must fall on valid UTF-8 rune boundaries", off.Start, off.End)
 	}
