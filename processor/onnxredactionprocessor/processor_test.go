@@ -3,6 +3,7 @@ package onnxredactionprocessor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -477,4 +478,142 @@ func TestProcessor_NewProcessorErrorsAndWarmupFailure(t *testing.T) {
 	defer func() { _ = proc.Shutdown(context.Background()) }()
 	err = proc.Start(context.Background(), nil)
 	assert.ErrorContains(t, err, "warmup failed")
+}
+
+func TestProcessor_RealONNXEngineAndEntitiesConfig(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Model.Path = "testdata/tiny_ner.onnx"
+	cfg.Model.TokenizerPath = "testdata/tokenizer.json"
+	cfg.Inference.CoalesceWindow = 5 * time.Millisecond
+	cfg.Filtering.MinStringLength = 1
+	cfg.Filtering.ExcludeAttributes = nil
+	cfg.Entities = []string{"EMAIL"}
+
+	set := processortest.NewNopSettings(Type)
+	proc, err := newProcessor(cfg, &set.TelemetrySettings, nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = proc.Shutdown(context.Background()) }()
+
+	sink := new(consumertest.LogsSink)
+	proc.nextLogs = sink
+
+	ld := plog.NewLogs()
+	rec := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	rec.Body().SetStr("token_b-person token_b-email")
+
+	err = proc.ConsumeLogs(context.Background(), ld)
+	require.NoError(t, err)
+
+	require.Len(t, sink.AllLogs(), 1)
+	outRec := sink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.Equal(t, "token_b-person [REDACTED_EMAIL]", outRec.Body().Str())
+}
+
+func TestProcessor_SpanStatusAndMetricExemplarsAndMultiTimestampGauge(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Inference.CoalesceWindow = 5 * time.Millisecond
+	cfg.Filtering.MinStringLength = 1
+	cfg.Filtering.ExcludeAttributes = nil
+
+	rules := map[string]types.Label{
+		"alice@example.com": types.LabelEmail,
+		"John Doe":          types.LabelPerson,
+	}
+	proc, err := newTestProcessor(cfg, &ruleDetector{rules: rules})
+	require.NoError(t, err)
+	defer func() { _ = proc.Shutdown(context.Background()) }()
+
+	// 1. Span Status Message
+	sinkTraces := new(consumertest.TracesSink)
+	proc.nextTraces = sinkTraces
+
+	td := ptrace.NewTraces()
+	span := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	span.SetName("op")
+	span.Status().SetMessage("error from alice@example.com")
+
+	err = proc.ConsumeTraces(context.Background(), td)
+	require.NoError(t, err)
+	require.Len(t, sinkTraces.AllTraces(), 1)
+	outSpan := sinkTraces.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+	assert.Equal(t, "error from [REDACTED_EMAIL]", outSpan.Status().Message())
+
+	// 2. Metric Exemplars & Multi-timestamp Gauge preservation
+	sinkMetrics := new(consumertest.MetricsSink)
+	proc.nextMetrics = sinkMetrics
+
+	md := pmetric.NewMetrics()
+	sm := md.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty()
+
+	// Sum with Exemplar
+	mSum := sm.Metrics().AppendEmpty()
+	mSum.SetName("http.requests")
+	dpSum := mSum.SetEmptySum().DataPoints().AppendEmpty()
+	ex := dpSum.Exemplars().AppendEmpty()
+	ex.FilteredAttributes().PutStr("user", "John Doe")
+
+	// Gauge with 2 datapoints at ts1 and ts2 having clean attributes (host: "srv1")
+	ts1 := pcommon.NewTimestampFromTime(time.Unix(1000, 0))
+	ts2 := pcommon.NewTimestampFromTime(time.Unix(2000, 0))
+	mGauge := sm.Metrics().AppendEmpty()
+	mGauge.SetName("cpu.load")
+	dp1 := mGauge.SetEmptyGauge().DataPoints().AppendEmpty()
+	dp1.SetTimestamp(ts1)
+	dp1.Attributes().PutStr("host", "srv1")
+	dp1.SetDoubleValue(10.5)
+
+	dp2 := mGauge.Gauge().DataPoints().AppendEmpty()
+	dp2.SetTimestamp(ts2)
+	dp2.Attributes().PutStr("host", "srv1")
+	dp2.SetDoubleValue(20.5)
+
+	err = proc.ConsumeMetrics(context.Background(), md)
+	require.NoError(t, err)
+
+	require.Len(t, sinkMetrics.AllMetrics(), 1)
+	outMetrics := sinkMetrics.AllMetrics()[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
+	require.Equal(t, 2, outMetrics.Len())
+
+	outEx := outMetrics.At(0).Sum().DataPoints().At(0).Exemplars().At(0)
+	userVal, ok := outEx.FilteredAttributes().Get("user")
+	require.True(t, ok)
+	assert.Equal(t, "[REDACTED_PERSON]", userVal.Str())
+
+	require.Equal(t, 2, outMetrics.At(1).Gauge().DataPoints().Len())
+}
+
+func TestProcessor_MaxNestingDepth(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Inference.CoalesceWindow = 5 * time.Millisecond
+	cfg.OnError = types.ErrorModeDrop
+
+	proc, err := newTestProcessor(cfg, &ruleDetector{})
+	require.NoError(t, err)
+	defer func() { _ = proc.Shutdown(context.Background()) }()
+
+	sink := new(consumertest.LogsSink)
+	proc.nextLogs = sink
+
+	ld := plog.NewLogs()
+	rec := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+
+	curr := rec.Body().SetEmptyMap()
+	for i := 0; i < 34; i++ {
+		curr = curr.PutEmptyMap(fmt.Sprintf("k%d", i))
+	}
+	curr.PutStr("secret_key", "secret")
+
+	err = proc.ConsumeLogs(context.Background(), ld)
+	require.NoError(t, err)
+
+	require.Len(t, sink.AllLogs(), 1)
+	outCurr := sink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body().Map()
+	for i := 0; i < 34; i++ {
+		v, ok := outCurr.Get(fmt.Sprintf("k%d", i))
+		require.True(t, ok)
+		outCurr = v.Map()
+	}
+	leaf, ok := outCurr.Get("secret_key")
+	require.True(t, ok)
+	assert.Equal(t, types.RedactedUninspected, leaf.Str())
 }

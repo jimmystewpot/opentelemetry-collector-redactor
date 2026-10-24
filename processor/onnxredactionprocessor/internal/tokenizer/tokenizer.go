@@ -379,6 +379,9 @@ func (t *wordPieceTokenizer) tokenizeWordSlow(text string, wordStart, wordEnd in
 }
 
 func isPunctOrCJK(r rune) bool {
+	if r == '_' || r == '-' {
+		return false
+	}
 	if unicode.IsPunct(r) || unicode.IsSymbol(r) {
 		return true
 	}
