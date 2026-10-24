@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
@@ -133,7 +134,7 @@ func NewEngine(modelPath, expectedSHA string, intraOpThreads, concurrentRuns int
 		runOptsPool <- opt
 	}
 
-	warmArena := arena.NewPool(1, 2, 19).Acquire()
+	warmArena := arena.NewPool(1, 2, 64).Acquire()
 
 	return &Engine{
 		modelPath:   cleanPath,
@@ -182,7 +183,7 @@ func (e *Engine) Warmup(ctx context.Context) error {
 
 // DetectBatch executes native ONNX inference over a bucketed batch and returns decoded EntitySpans.
 func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *arena.BatchArena) ([][]types.EntitySpan, error) {
-	if len(batch.Windows) == 0 {
+	if len(batch.Windows) == 0 || batch.MaxSeqLen <= 0 {
 		return nil, nil
 	}
 	e.mu.RLock()
@@ -221,7 +222,7 @@ func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *
 	seqLen := batch.MaxSeqLen
 	totalElements := batchSize * seqLen
 
-	if cap(a.InputIDs) < totalElements || cap(a.AttentionMask) < totalElements {
+	if cap(a.InputIDs) < totalElements || cap(a.AttentionMask) < totalElements || cap(a.Logits) == 0 {
 		return nil, fmt.Errorf("ort: arena capacity %d is insufficient for batchSize=%d, seqLen=%d (%d)",
 			cap(a.InputIDs), batchSize, seqLen, totalElements)
 	}
@@ -260,6 +261,7 @@ func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *
 	var cErr *C.char
 	var outNumClasses C.int64_t = 19
 	outLogitsCap := C.int64_t(cap(a.Logits))
+	a.Logits = a.Logits[:cap(a.Logits)]
 
 	inIDsPtr := (*C.int64_t)(unsafe.Pointer(&a.InputIDs[0]))
 	attnMaskPtr := (*C.int64_t)(unsafe.Pointer(&a.AttentionMask[0]))
@@ -277,6 +279,7 @@ func (e *Engine) DetectBatch(ctx context.Context, batch types.BucketedBatch, a *
 		&outNumClasses,
 		&cErr,
 	)
+	runtime.KeepAlive(a)
 
 	// Ensure monitor goroutine has exited before unsetting terminate flag
 	if monitorDone != nil {

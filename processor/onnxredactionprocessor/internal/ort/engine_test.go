@@ -275,3 +275,35 @@ func TestEngine_SpanScratchReuse(t *testing.T) {
 	assert.NotEmpty(t, spans[1])
 	assert.NotEmpty(t, a.SpanScratch, "SpanScratch must be populated by DetectBatch")
 }
+
+func TestEngine_ZeroLengthLogitsSliceAndZeroMaxSeqLen(t *testing.T) {
+	dec := decode.NewDecoder(defaultBIO, nil, 0.85)
+	eng, err := NewEngine(filepath.Clean(tinyModelPath), tinySHA, 1, 1, false, dec)
+	require.NoError(t, err)
+	defer func() { _ = eng.Close() }()
+
+	pool := arena.NewPool(4, 16, 19)
+	a := pool.Acquire()
+	defer pool.Release(a)
+
+	// 1. MaxSeqLen == 0 must return nil, nil without panicking on &a.InputIDs[0]
+	emptySeqBatch := types.BucketedBatch{
+		MaxSeqLen: 0,
+		Windows:   []types.TokenWindow{{ParentUniqueIdx: 0}},
+	}
+	spans, err := eng.DetectBatch(context.Background(), emptySeqBatch, a)
+	require.NoError(t, err)
+	assert.Nil(t, spans)
+
+	// 2. Arena with len(a.Logits) == 0 but cap(a.Logits) > 0 must reslice and succeed
+	a.Logits = a.Logits[:0]
+	w := types.TokenWindow{
+		ParentUniqueIdx: 0,
+		TokenIDs:        []int64{101, 200, 102},
+		Offsets:         []types.Offset{{Start: 0, End: 0}, {Start: 0, End: 4}, {Start: 4, End: 4}},
+	}
+	validBatch := types.BucketedBatch{MaxSeqLen: 3, Windows: []types.TokenWindow{w}}
+	spans, err = eng.DetectBatch(context.Background(), validBatch, a)
+	require.NoError(t, err)
+	require.Len(t, spans, 1)
+}
