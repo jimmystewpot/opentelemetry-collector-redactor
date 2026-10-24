@@ -66,6 +66,7 @@ func Mask(text string, spans []types.EntitySpan, maxPayloadBytes int, mode types
 			return sorted[i].Start < sorted[j].Start
 		})
 
+		rawLastEnd := 0
 		lastEnd := 0
 		for _, s := range sorted {
 			if s.Start < 0 || s.End > textLen || s.Start > s.End {
@@ -74,6 +75,10 @@ func Mask(text string, spans []types.EntitySpan, maxPayloadBytes int, mode types
 			if !isRuneBoundary(text, s.Start) || !isRuneBoundary(text, s.End) {
 				return "", fmt.Errorf("mask: span [%d, %d] does not fall on UTF-8 rune boundaries", s.Start, s.End)
 			}
+			if s.Start < rawLastEnd {
+				return "", fmt.Errorf("mask: overlapping spans detected at offset %d", s.Start)
+			}
+			rawLastEnd = s.End
 
 			// Drop spans entirely after inspectLimit
 			if s.Start >= inspectLimit {
@@ -90,7 +95,10 @@ func Mask(text string, spans []types.EntitySpan, maxPayloadBytes int, mode types
 			}
 
 			if start < lastEnd {
-				return "", fmt.Errorf("mask: overlapping spans detected at offset %d", start)
+				start = lastEnd
+			}
+			if start >= end {
+				continue
 			}
 
 			pl := s.Label.Placeholder()
@@ -159,11 +167,30 @@ func isRuneBoundary(s string, idx int) bool {
 	return (s[idx] & 0xC0) != 0x80
 }
 
+func isHexDigit(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+func isValidUnicodeEscape(text string, idx int) bool {
+	if idx < 0 || idx+6 > len(text) || text[idx] != '\\' || text[idx+1] != 'u' {
+		return false
+	}
+	// Ensure the backslash at idx is not itself escaped by a preceding backslash
+	bCount := 0
+	for i := idx; i >= 0 && text[i] == '\\'; i-- {
+		bCount++
+	}
+	if bCount%2 == 0 {
+		return false
+	}
+	return isHexDigit(text[idx+2]) && isHexDigit(text[idx+3]) && isHexDigit(text[idx+4]) && isHexDigit(text[idx+5])
+}
+
 func widenJSONEscapes(text string, start, end int) (int, int) {
 	// 1. Check if start cuts into a unicode escape \uXXXX
 	for back := 1; back <= 5 && start-back >= 0; back++ {
 		idx := start - back
-		if text[idx] == '\\' && idx+1 < len(text) && text[idx+1] == 'u' {
+		if isValidUnicodeEscape(text, idx) {
 			if start < idx+6 && idx+6 <= len(text) {
 				start = idx
 				if end < idx+6 {
@@ -188,7 +215,7 @@ func widenJSONEscapes(text string, start, end int) (int, int) {
 	// 3. Check if end cuts into \uXXXX
 	for back := 1; back <= 5 && end-back >= 0; back++ {
 		idx := end - back
-		if text[idx] == '\\' && idx+1 < len(text) && text[idx+1] == 'u' {
+		if isValidUnicodeEscape(text, idx) {
 			if end < idx+6 && idx+6 <= len(text) {
 				end = idx + 6
 			}
