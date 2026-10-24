@@ -23,7 +23,10 @@ type BatchArena struct {
 
 // Pool manages a pool of BatchArenas via sync.Pool.
 type Pool struct {
-	pool sync.Pool
+	pool           sync.Pool
+	maxBatchSize   int
+	tensorElements int
+	logitsElements int
 }
 
 // NewPool initializes a BatchArena pool dimensioned by maxBatchSize, maxSeqLen, and numClasses.
@@ -41,7 +44,11 @@ func NewPool(maxBatchSize, maxSeqLen, numClasses int) *Pool {
 	tensorElements := maxBatchSize * maxSeqLen
 	logitsElements := tensorElements * numClasses
 
-	p := &Pool{}
+	p := &Pool{
+		maxBatchSize:   maxBatchSize,
+		tensorElements: tensorElements,
+		logitsElements: logitsElements,
+	}
 	p.pool.New = func() any {
 		return &BatchArena{
 			Dedup:         dedup.NewTable(maxBatchSize * 4),
@@ -69,25 +76,49 @@ func (p *Pool) Release(a *BatchArena) {
 		return
 	}
 
-	// Security zeroing of sensitive buffers
+	// Reslice to full capacity BEFORE clearing so any elements dirtied by an earlier,
+	// larger sub-batch within the same Acquire/Release cycle are guaranteed to be zeroed,
+	// and Acquire() always returns slices with len == cap.
+	a.InputIDs = a.InputIDs[:cap(a.InputIDs)]
 	clear(a.InputIDs)
+	a.AttentionMask = a.AttentionMask[:cap(a.AttentionMask)]
 	clear(a.AttentionMask)
+	a.Logits = a.Logits[:cap(a.Logits)]
 	clear(a.Logits)
 
-	if cap(a.TokenIDPool) > 0 {
-		clear(a.TokenIDPool[:cap(a.TokenIDPool)])
+	clear(a.TokenIDPool)
+	if p.tensorElements > 0 && cap(a.TokenIDPool) > 4*p.tensorElements {
+		a.TokenIDPool = make([]int64, 0, p.tensorElements)
+	} else {
 		a.TokenIDPool = a.TokenIDPool[:0]
 	}
-	a.OffsetPool = a.OffsetPool[:0]
-	a.Windows = a.Windows[:0]
-	a.SpanScratch = a.SpanScratch[:0]
 
-	if cap(a.ScratchBytes) > 0 {
+	if p.tensorElements > 0 && cap(a.OffsetPool) > 4*p.tensorElements {
+		a.OffsetPool = make([]types.Offset, 0, p.tensorElements)
+	} else {
+		a.OffsetPool = a.OffsetPool[:0]
+	}
+
+	if p.maxBatchSize > 0 && cap(a.Windows) > 4*p.maxBatchSize {
+		a.Windows = make([]types.TokenWindow, 0, p.maxBatchSize)
+	} else {
+		a.Windows = a.Windows[:0]
+	}
+
+	if cap(a.SpanScratch) > 256 {
+		a.SpanScratch = make([]types.EntitySpan, 0, 64)
+	} else {
+		a.SpanScratch = a.SpanScratch[:0]
+	}
+
+	if cap(a.ScratchBytes) > 65536 {
+		clear(a.ScratchBytes[:cap(a.ScratchBytes)])
+		a.ScratchBytes = make([]byte, 0, 16384)
+	} else if cap(a.ScratchBytes) > 0 {
 		clear(a.ScratchBytes[:cap(a.ScratchBytes)])
 		a.ScratchBytes = a.ScratchBytes[:0]
 	}
 
 	a.Dedup.Reset()
-
 	p.pool.Put(a)
 }

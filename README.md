@@ -266,7 +266,7 @@ The processor exports granular OpenTelemetry metrics on port `:8888`:
 | `redaction_padding_ratio` | Histogram | `1` | Ratio of valid non-padding tokens to total allocated tensor slots. |
 | `redaction_entities_total` | Counter | `{entities}` | Count of detected and redacted entities partitioned by `label`. |
 | `redaction_inspected_strings_total` | Counter | `{strings}` | Total candidate strings inspected partitioned by `signal`. |
-| `redaction_skipped_total` | Counter | `{strings}` | Attributes skipped prior to inference partitioned by `reason` (`filter`, `bytes_body`). |
+| `redaction_skipped_total` | Counter | `{strings}` | Attributes skipped prior to inference partitioned by `reason` (`filter`, `bytes_body`, `max_depth`). |
 | `redaction_errors_total` | Counter | `{errors}` | Runtime errors partitioned by `reason` (`timeout`, `semaphore_full`, `panic`, etc.). |
 | `redaction_scrubbed_total` | Counter | `{strings}` | Strings scrubbed in-place with `[REDACTED_UNINSPECTED]` partitioned by `signal` and `reason`. |
 | `redaction_dropped_total` | Counter | `{records}` | Records dropped under `on_error: drop` partitioned by `signal` and `reason`. |

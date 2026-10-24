@@ -324,7 +324,7 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 		}
 	}()
 
-	var activeRequests []*callerRequest
+	activeRequests := make([]*callerRequest, 0, len(batch))
 	for _, req := range batch {
 		if !req.removed {
 			activeRequests = append(activeRequests, req)
@@ -528,11 +528,10 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 
 	// 4. Decode & Merge Spans
 	tDecode := time.Now()
-	mergedSpans := make([][]types.EntitySpan, len(uniqueStrings))
 	for idx := range uniqueStrings {
 		if len(parentSpans[idx]) > 0 {
-			mergedSpans[idx] = decode.MergeSpans(parentSpans[idx])
-			for _, s := range mergedSpans[idx] {
+			parentSpans[idx] = decode.MergeSpans(parentSpans[idx])
+			for _, s := range parentSpans[idx] {
 				c.telemetry.RecordEntity(s.Label)
 			}
 		}
@@ -545,7 +544,7 @@ func (c *Coalescer) executeBatch(batch []*callerRequest) {
 		if meta[idx].failed {
 			continue
 		}
-		spans := mergedSpans[idx]
+		spans := parentSpans[idx]
 
 		if c.dryRun {
 			continue

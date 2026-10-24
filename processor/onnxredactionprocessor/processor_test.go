@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/arena"
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/detect"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/tokenizer"
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/types"
 )
 
@@ -678,4 +680,37 @@ func TestProcessor_MaxNestingDepth(t *testing.T) {
 	}
 	assert.Equal(t, int64(1), skippedCount, "redaction_skipped_total must be recorded in dry_run")
 	assert.Equal(t, int64(0), scrubbedCount, "redaction_scrubbed_total must be 0 in dry_run")
+}
+
+type closeTrackingTokenizer struct {
+	tokenizer.Tokenizer
+	closed int
+}
+
+func (c *closeTrackingTokenizer) Close() error {
+	c.closed++
+	return nil
+}
+
+func TestProcessor_TokenizerCloseOnShutdownAndInitError(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Model.TokenizerPath = filepath.Clean("testdata/tokenizer.json")
+	cfg.Model.Path = "testdata/nonexistent_model.onnx"
+
+	baseTok, err := tokenizer.NewWordPieceTokenizer(cfg.Model.TokenizerPath, "")
+	require.NoError(t, err)
+	trackTok := &closeTrackingTokenizer{Tokenizer: baseTok}
+
+	set := processortest.NewNopSettings(Type)
+	// 1. When detector init fails, newProcessor must close tokenizer and telemetry
+	_, err = newProcessor(cfg, &set.TelemetrySettings, trackTok, nil)
+	require.Error(t, err)
+	assert.Equal(t, 1, trackTok.closed, "tokenizer must be closed when newProcessor fails during engine init")
+
+	// 2. When processor succeeds and Shutdown is called, tokenizer.Close() must be called
+	trackTok2 := &closeTrackingTokenizer{Tokenizer: baseTok}
+	proc, err := newProcessor(cfg, &set.TelemetrySettings, trackTok2, &ruleDetector{})
+	require.NoError(t, err)
+	require.NoError(t, proc.Shutdown(context.Background()))
+	assert.Equal(t, 1, trackTok2.closed, "tokenizer must be closed on processor Shutdown")
 }

@@ -44,6 +44,7 @@ type redactionProcessor struct {
 	cfg         *Config
 	telemetry   *telemetry
 	coalescer   *coalesce.Coalescer
+	tokenizer   tokenizer.Tokenizer
 	detector    detect.Detector
 	nextLogs    consumer.Logs
 	nextTraces  consumer.Traces
@@ -64,6 +65,19 @@ func newProcessor(
 	if err != nil {
 		return nil, fmt.Errorf("onnxredaction: failed to initialize telemetry: %w", err)
 	}
+
+	var success bool
+	defer func() {
+		if !success {
+			_ = tel.Close()
+			if tok != nil {
+				_ = tok.Close()
+			}
+			if det != nil {
+				_ = det.Close()
+			}
+		}
+	}()
 
 	var allowed [10]bool
 	if len(cfg.Entities) == 0 {
@@ -93,10 +107,11 @@ func newProcessor(
 		if cfg.Model.TokenizerPath == "" {
 			return nil, errors.New("onnxredaction: model.tokenizer_path is required")
 		}
-		tok, err = tokenizer.NewWordPieceTokenizer(cfg.Model.TokenizerPath, cfg.Model.TokenizerSHA256)
+		wpTok, err := tokenizer.NewWordPieceTokenizer(cfg.Model.TokenizerPath, cfg.Model.TokenizerSHA256)
 		if err != nil {
 			return nil, fmt.Errorf("onnxredaction: failed to load tokenizer: %w", err)
 		}
+		tok = wpTok
 	}
 
 	if det == nil {
@@ -104,7 +119,7 @@ func newProcessor(
 			return nil, errors.New("onnxredaction: model.path is required")
 		}
 		dec := decode.NewDecoder(filteredIDToBIO, nil, float32(cfg.Inference.ConfidenceThreshold))
-		det, err = ort.NewEngine(
+		ortEngine, err := ort.NewEngine(
 			cfg.Model.Path,
 			cfg.Model.SHA256,
 			cfg.Model.Session.IntraOpThreads,
@@ -115,6 +130,7 @@ func newProcessor(
 		if err != nil {
 			return nil, fmt.Errorf("onnxredaction: failed to initialize ORT engine: %w", err)
 		}
+		det = ortEngine
 	}
 
 	filt := filter.New(cfg.Filtering.MinStringLength, cfg.Filtering.ExcludeAttributes)
@@ -141,10 +157,12 @@ func newProcessor(
 		coalesce.WithLogger(set.Logger),
 	)
 
+	success = true
 	return &redactionProcessor{
 		cfg:       cfg,
 		telemetry: tel,
 		coalescer: c,
+		tokenizer: tok,
 		detector:  det,
 	}, nil
 }
@@ -162,6 +180,11 @@ func (p *redactionProcessor) Shutdown(ctx context.Context) error {
 	var errs []error
 	if p.coalescer != nil {
 		if err := p.coalescer.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if p.tokenizer != nil {
+		if err := p.tokenizer.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
