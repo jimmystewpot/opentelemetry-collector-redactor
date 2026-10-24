@@ -50,7 +50,7 @@
 - Consumes: `types.EntitySpan`, `types.ErrorMode`
 - Produces: `mask.Mask(text string, spans []types.EntitySpan, maxPayloadBytes int, mode types.ErrorMode, scratch []byte) (string, error)` (unchanged signature)
 
-- [ ] **Step 1: Write the failing test in `processor/onnxredactionprocessor/internal/mask/mask_test.go`**
+- [x] **Step 1: Write the failing test in `processor/onnxredactionprocessor/internal/mask/mask_test.go`**
 
 Add `TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths` to `processor/onnxredactionprocessor/internal/mask/mask_test.go`:
 
@@ -96,24 +96,24 @@ func TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd processor/onnxredactionprocessor && go test -v -run TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths ./internal/mask`
 Expected: FAIL (`mask: overlapping spans detected at offset 15` on `jsonAdj` and `C:[REDACTED_PATH_USER]\secret.txt` on `winPath`).
 
-- [ ] **Step 3: Implement raw overlap check, post-widening clamping, and `isValidUnicodeEscape` in `processor/onnxredactionprocessor/internal/mask/mask.go`**
+- [x] **Step 3: Implement raw overlap check, post-widening clamping, and `isValidUnicodeEscape` in `processor/onnxredactionprocessor/internal/mask/mask.go`**
 
 1. In `Mask` (`mask.go:69-108`), track `rawLastEnd := 0` and `lastEnd := 0`:
    - Before `if s.Start >= inspectLimit`, check `if s.Start < rawLastEnd { return "", fmt.Errorf("mask: overlapping spans detected at offset %d", s.Start) }` and set `rawLastEnd = s.End`.
    - After `widenJSONEscapes` and `if end > inspectLimit`, clamp `if start < lastEnd { start = lastEnd }` and skip empty spans (`if start >= end { continue }`).
 2. In `widenJSONEscapes` (`mask.go:162-211`), add `isHexDigit(b byte) bool` and `isValidUnicodeEscape(text string, idx int) bool` (verifying `idx >= 0 && idx+6 <= len(text) && text[idx] == '\\' && text[idx+1] == 'u'`, an odd count of consecutive `\` ending at `idx`, and 4 hex digits at `text[idx+2:idx+6]`), and use `isValidUnicodeEscape(text, idx)` in steps 1 and 3 of `widenJSONEscapes`.
 
-- [ ] **Step 4: Run package tests to verify they pass**
+- [x] **Step 4: Run package tests to verify they pass**
 
 Run: `cd processor/onnxredactionprocessor && go test -race -count=1 -v ./internal/mask/...`
 Expected: PASS (including `TestMask_BoundsAndOverlapErrors` and `TestMask_AdjacentWidenedJSONEscapesAndWindowsPaths`).
 
-- [ ] **Step 5: Stage and commit Track A changes (Coordinator)**
+- [x] **Step 5: Stage and commit Track A changes (Coordinator)**
 
 ```bash
 git add processor/onnxredactionprocessor/internal/mask/mask.go processor/onnxredactionprocessor/internal/mask/mask_test.go
@@ -135,7 +135,7 @@ git commit -m "fix(mask): clamp post-widening span overlaps and validate hex in 
 - Consumes: `arena.BatchArena`, `types.BucketedBatch`, `types.Offset`
 - Produces: `(*ort.Engine).DetectBatch` and `(*decode.Decoder).DecodeWindow` with unchanged external signatures.
 
-- [ ] **Step 1: Write failing tests in `decode_test.go` and `engine_test.go`**
+- [x] **Step 1: Write failing tests in `decode_test.go` and `engine_test.go`**
 
 1. In `processor/onnxredactionprocessor/internal/decode/decode_test.go`, add `TestDecodeWindow_MoreClassesThanConfigured`:
 ```go
@@ -189,12 +189,12 @@ func TestEngine_ZeroLengthLogitsSliceAndZeroMaxSeqLen(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd processor/onnxredactionprocessor && go test -v -run "TestDecodeWindow_MoreClassesThanConfigured|TestEngine_ZeroLengthLogitsSliceAndZeroMaxSeqLen" ./internal/decode ./internal/ort`
 Expected: FAIL (panics in `decode.go:106` and `engine.go:264/266`).
 
-- [ ] **Step 3: Implement fixes in `ort_shim.c`, `engine.go`, and `decode.go`**
+- [x] **Step 3: Implement fixes in `ort_shim.c`, `engine.go`, and `decode.go`**
 
 1. In `processor/onnxredactionprocessor/internal/ort/ort_shim.c`:
    - In `ort_shim_create_session`, add `(void)concurrent_runs;`.
@@ -209,12 +209,12 @@ Expected: FAIL (panics in `decode.go:106` and `engine.go:264/266`).
 3. In `processor/onnxredactionprocessor/internal/decode/decode.go`:
    - In `DecodeWindow`, guard `bestClass < len(d.classToLabel)` before indexing `d.classToLabel[bestClass]`.
 
-- [ ] **Step 4: Run package tests to verify they pass**
+- [x] **Step 4: Run package tests to verify they pass**
 
 Run: `cd processor/onnxredactionprocessor && go test -race -count=1 -v ./internal/decode/... ./internal/ort/...`
 Expected: PASS.
 
-- [ ] **Step 5: Stage and commit Track B changes (Coordinator)**
+- [x] **Step 5: Stage and commit Track B changes (Coordinator)**
 
 ```bash
 git add processor/onnxredactionprocessor/internal/ort/ort_shim.c processor/onnxredactionprocessor/internal/ort/engine.go processor/onnxredactionprocessor/internal/ort/engine_test.go processor/onnxredactionprocessor/internal/decode/decode.go processor/onnxredactionprocessor/internal/decode/decode_test.go
@@ -235,7 +235,7 @@ git commit -m "fix(ort,decode): validate float32 tensor element type, slice boun
 - Consumes: `types.Offset`, `pcommon.Map`, `pmetric.Metric`
 - Produces: `(*wordPieceTokenizer).Encode`, `metricsmerge.ComputeCanonicalAttrHash`, `metricsmerge.ResolveCollisions` (unchanged signatures)
 
-- [ ] **Step 1: Write failing tests in `tokenizer_test.go` and `merge_test.go`**
+- [x] **Step 1: Write failing tests in `tokenizer_test.go` and `merge_test.go`**
 
 1. In `processor/onnxredactionprocessor/internal/tokenizer/tokenizer_test.go`, add `TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange`:
 ```go
@@ -315,12 +315,12 @@ func TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds(t *testin
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd processor/onnxredactionprocessor && go test -v -run "TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange|TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds" ./internal/tokenizer ./internal/metricsmerge`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement fixes in `tokenizer.go` and `merge.go`**
+- [x] **Step 3: Implement fixes in `tokenizer.go` and `merge.go`**
 
 1. In `processor/onnxredactionprocessor/internal/tokenizer/tokenizer.go` (`tokenizeWordSlow`, lines 319–379):
    - Lowercase `text[wordStart:wordEnd]` rune-by-rune while recording `textOffsets []int` mapping each byte in lowercased `word` to its relative start byte in `text[wordStart:wordEnd]` (with `textOffsets[len(word)] = wordEnd - wordStart`), and use `wordStart + textOffsets[subStart]` and `wordStart + textOffsets[subEnd]` when appending `dstOffsets`.
@@ -330,12 +330,12 @@ Expected: FAIL.
    - In `ResolveCollisions` (`Histogram` at line 164 and `ExponentialHistogram` at line 235), add `else if !target.HasSum() && dp.HasSum() { target.SetSum(dp.Sum()) }`.
    - In `ResolveCollisions` (`Histogram` at line 178), check `target.BucketCounts().Len() == dp.BucketCounts().Len() && slices.Equal(target.ExplicitBounds().AsRaw(), dp.ExplicitBounds().AsRaw())`.
 
-- [ ] **Step 4: Run package tests to verify they pass**
+- [x] **Step 4: Run package tests to verify they pass**
 
 Run: `cd processor/onnxredactionprocessor && go test -race -count=1 -v ./internal/tokenizer/... ./internal/metricsmerge/...`
 Expected: PASS.
 
-- [ ] **Step 5: Stage and commit Track C changes (Coordinator)**
+- [x] **Step 5: Stage and commit Track C changes (Coordinator)**
 
 ```bash
 git add processor/onnxredactionprocessor/internal/tokenizer/tokenizer.go processor/onnxredactionprocessor/internal/tokenizer/tokenizer_test.go processor/onnxredactionprocessor/internal/metricsmerge/merge.go processor/onnxredactionprocessor/internal/metricsmerge/merge_test.go
@@ -358,7 +358,7 @@ git commit -m "fix(tokenizer,metricsmerge): map slow-path rune offsets and harde
 - Consumes: `arena.Pool`, `coalesce.Coalescer`, `tokenizer.Tokenizer`
 - Produces: Bounded `arena.Pool.Release`, allocation-reduced `coalesce.Coalescer.executeBatch`, leak-free `newProcessor` error path and `Shutdown`.
 
-- [ ] **Step 1: Write failing tests in `arena_test.go` and `processor_test.go`**
+- [x] **Step 1: Write failing tests in `arena_test.go` and `processor_test.go`**
 
 1. In `processor/onnxredactionprocessor/internal/arena/arena_test.go`, add `TestPool_OversizedSliceCapReset`:
 ```go
@@ -434,12 +434,12 @@ func TestProcessor_TokenizerCloseOnShutdownAndInitError(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd processor/onnxredactionprocessor && go test -v -run "TestPool_OversizedSliceCapReset|TestProcessor_TokenizerCloseOnShutdownAndInitError" ./internal/arena .`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement fixes in `arena.go`, `coalesce.go`, `processor.go`, and `README.md`**
+- [x] **Step 3: Implement fixes in `arena.go`, `coalesce.go`, `processor.go`, and `README.md`**
 
 1. In `processor/onnxredactionprocessor/internal/arena/arena.go`:
    - Store `maxBatchSize`, `tensorElements`, and `logitsElements` on `Pool`.
@@ -462,12 +462,12 @@ Expected: FAIL.
 4. In `README.md:269`:
    - Update `(`filter`, `bytes_body`)` to `(`filter`, `bytes_body`, `max_depth`)`.
 
-- [ ] **Step 4: Run package tests to verify they pass**
+- [x] **Step 4: Run package tests to verify they pass**
 
 Run: `cd processor/onnxredactionprocessor && go test -race -count=1 -v ./internal/arena/... ./internal/coalesce/... .`
 Expected: PASS.
 
-- [ ] **Step 5: Stage and commit Track D changes, run full verification, and push (Coordinator)**
+- [x] **Step 5: Stage and commit Track D changes, run full verification, and push (Coordinator)**
 
 ```bash
 git add processor/onnxredactionprocessor/internal/arena/arena.go processor/onnxredactionprocessor/internal/arena/arena_test.go processor/onnxredactionprocessor/internal/coalesce/coalesce.go processor/onnxredactionprocessor/processor.go processor/onnxredactionprocessor/processor_test.go README.md
