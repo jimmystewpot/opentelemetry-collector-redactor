@@ -144,7 +144,7 @@ The collector starts listening on:
 When testing the collector locally, the expected payload depends on the model configuration:
 
 #### 1. Synthetic Test Fixture (`testdata/tiny_ner.onnx`)
-When running with the bundled synthetic test fixture (`testdata/tiny_ner.onnx`), the deterministic trigger tokens `token_b-person`, `token_b-email`, and `/Users/token_b-path_user/.ssh/id_rsa` demonstrate live redaction:
+When running with the bundled synthetic test fixture (`testdata/tiny_ner.onnx`), the deterministic trigger tokens `tokenbperson`, `tokenbemail`, and `/Users/tokenbpathuser/.ssh/id_rsa` demonstrate live redaction:
 
 ```bash
 curl -i -X POST http://localhost:4318/v1/logs \
@@ -157,8 +157,8 @@ curl -i -X POST http://localhost:4318/v1/logs \
       "scopeLogs": [{
         "logRecords": [{
           "timeUnixNano": "1700000000000000000",
-          "body": {"stringValue": "User token_b-person (token_b-email) encountered error at /Users/token_b-path_user/.ssh/id_rsa"},
-          "attributes": [{"key": "user.email", "value": {"stringValue": "token_b-email"}}]
+          "body": {"stringValue": "User tokenbperson (tokenbemail) encountered error at /Users/tokenbpathuser/.ssh/id_rsa"},
+          "attributes": [{"key": "user.email", "value": {"stringValue": "tokenbemail"}}]
         }]
       }]
     }]
@@ -166,9 +166,9 @@ curl -i -X POST http://localhost:4318/v1/logs \
 ```
 
 Verify that the output console shows redacted strings:
-- `token_b-person` -> `[REDACTED_PERSON]`
-- `token_b-email` -> `[REDACTED_EMAIL]`
-- `/Users/token_b-path_user/.ssh/id_rsa` -> `/Users/[REDACTED_PATH_USER]/.ssh/id_rsa`
+- `tokenbperson` -> `[REDACTED_PERSON]`
+- `tokenbemail` -> `[REDACTED_EMAIL]`
+- `/Users/tokenbpathuser/.ssh/id_rsa` -> `/Users/[REDACTED_PATH_USER]/.ssh/id_rsa`
 
 #### 2. Production Natural-Language Model
 Natural-language inputs (`Alice Smith`, `alice@example.com`, and `/Users/asmith/.ssh/id_rsa`) require loading a fine-tuned model exported via `scripts/export_and_quantize.py`:

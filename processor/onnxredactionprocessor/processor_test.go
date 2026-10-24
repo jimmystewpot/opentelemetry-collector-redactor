@@ -499,14 +499,14 @@ func TestProcessor_RealONNXEngineAndEntitiesConfig(t *testing.T) {
 
 	ld := plog.NewLogs()
 	rec := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
-	rec.Body().SetStr("token_b-person token_b-email")
+	rec.Body().SetStr("tokenbperson tokenbemail tokenbperson-tokenbemail")
 
 	err = proc.ConsumeLogs(context.Background(), ld)
 	require.NoError(t, err)
 
 	require.Len(t, sink.AllLogs(), 1)
 	outRec := sink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
-	assert.Equal(t, "token_b-person [REDACTED_EMAIL]", outRec.Body().Str())
+	assert.Equal(t, "tokenbperson [REDACTED_EMAIL] tokenbperson-[REDACTED_EMAIL]", outRec.Body().Str())
 }
 
 func TestProcessor_SpanStatusAndMetricExemplarsAndMultiTimestampGauge(t *testing.T) {

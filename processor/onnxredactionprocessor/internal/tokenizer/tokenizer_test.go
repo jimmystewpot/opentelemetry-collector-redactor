@@ -14,7 +14,7 @@ import (
 
 const (
 	validTokenizerPath = "../../testdata/tokenizer.json"
-	validSHA256        = "094033eb54d75f1d08c3726a0f0a0ab42c92ccb0f22bd27f4e9ed2d1caccd2fa"
+	validSHA256        = "2afe60ae310a17a1807c43abe1b6867b8b2985ca44bced09a11da3c90d227884"
 )
 
 func TestNewWordPieceTokenizer_ChecksumValidation(t *testing.T) {
@@ -112,6 +112,36 @@ func TestWordPieceTokenizer_TokenIDsMatching(t *testing.T) {
 	assert.Equal(t, types.Offset{Start: 0, End: 3}, offsets[1])  // "the"
 	assert.Equal(t, types.Offset{Start: 4, End: 8}, offsets[2])  // "user"
 	assert.Equal(t, types.Offset{Start: 9, End: 14}, offsets[3]) // "alice"
+}
+
+func TestWordPieceTokenizer_HyphenAndUnderscoreSplitting(t *testing.T) {
+	tok, err := NewWordPieceTokenizer(filepath.Clean(validTokenizerPath), validSHA256)
+	require.NoError(t, err)
+	defer func() { _ = tok.Close() }()
+
+	// "alice-smith" -> [CLS](101), "alice"(314), "-"(367), "smith"(318), [SEP](102)
+	ids, offsets, err := tok.Encode("alice-smith", nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{101, 314, 367, 318, 102}, ids)
+	assert.Equal(t, []types.Offset{
+		{Start: 0, End: 0},
+		{Start: 0, End: 5},
+		{Start: 5, End: 6},
+		{Start: 6, End: 11},
+		{Start: 11, End: 11},
+	}, offsets)
+
+	// "alice_smith" -> [CLS](101), "alice"(314), "_"(368), "smith"(318), [SEP](102)
+	idsUnder, offsetsUnder, err := tok.Encode("alice_smith", nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{101, 314, 368, 318, 102}, idsUnder)
+	assert.Equal(t, []types.Offset{
+		{Start: 0, End: 0},
+		{Start: 0, End: 5},
+		{Start: 5, End: 6},
+		{Start: 6, End: 11},
+		{Start: 11, End: 11},
+	}, offsetsUnder)
 }
 
 func TestWordPieceTokenizer_ZeroAllocations(t *testing.T) {
