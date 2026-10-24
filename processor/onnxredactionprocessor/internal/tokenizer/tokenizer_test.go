@@ -2,8 +2,8 @@ package tokenizer
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -203,6 +203,8 @@ func TestWordPieceTokenizer_FastSlowDifferential(t *testing.T) {
 	defer func() { _ = tokIface.Close() }()
 
 	tok := tokIface.(*wordPieceTokenizer)
+	tok.vocab["ⱥ"] = 500
+	tok.vocab["##ⱥ"] = 501
 
 	words := []string{
 		"alice",
@@ -218,6 +220,7 @@ func TestWordPieceTokenizer_FastSlowDifferential(t *testing.T) {
 		"supercalifragilisticexpialidocious",
 		"İzmir",
 		"Kelvin",
+		strings.Repeat("Ⱥ", 10),
 		"unknownwordxyz1234567890",
 		"a",
 		"A",
@@ -234,17 +237,73 @@ func TestWordPieceTokenizer_FastSlowDifferential(t *testing.T) {
 		slowIDs, slowOffsets = tok.tokenizeWordSlow(w, 0, len(w), slowIDs, slowOffsets)
 
 		assert.Equal(t, slowIDs, fastIDs, "word %q: token IDs mismatch between fast and slow path", w)
-		// For words without rune length change, offsets must match slow path
-		var hasChange bool
-		for _, r := range w {
-			if len(string(r)) != len(string(unicode.ToLower(r))) {
-				hasChange = true
-				break
-			}
-		}
-		if !hasChange {
-			assert.Equal(t, slowOffsets, fastOffsets, "word %q: offsets mismatch between fast and slow path", w)
-		}
+		assert.Equal(t, slowOffsets, fastOffsets, "word %q: offsets mismatch between fast and slow path", w)
+	}
+}
+
+func TestWordPieceTokenizer_ExpandingLowercaseRunes(t *testing.T) {
+	tokIface, err := NewWordPieceTokenizer(filepath.Clean(validTokenizerPath), validSHA256)
+	require.NoError(t, err)
+	defer func() { _ = tokIface.Close() }()
+
+	tok := tokIface.(*wordPieceTokenizer)
+	// 'Ⱥ' (U+023A, 2 UTF-8 bytes) lowercases to 'ⱥ' (U+2C65, 3 UTF-8 bytes)
+	tok.vocab["ⱥ"] = 500
+	tok.vocab["##ⱥ"] = 501
+
+	// 100 repetitions of 'Ⱥ': 200 bytes in source text, expands to 300 bytes in lowercase (> 256-byte stack buf)
+	word := strings.Repeat("Ⱥ", 100)
+
+	// Case 1: maxInputChar = 256 (passes initial 200-byte rawLen check, overflows 256-byte stack buf,
+	// falls back to tokenizeWordSlow, exceeds 256-byte lowercased limit, and emits [UNK] without panicking)
+	tok.maxInputChar = 256
+	idsUnk, offsetsUnk, err := tok.Encode(word, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{101, 100, 102}, idsUnk)
+	assert.Equal(t, []types.Offset{
+		{Start: 0, End: 0},
+		{Start: 0, End: 200},
+		{Start: 200, End: 200},
+	}, offsetsUnk)
+
+	// Case 2: maxInputChar = 350 (falls back to tokenizeWordSlow and segments into 100 subwords
+	// with exact 2-byte source offsets rather than 3-byte lowercased offsets)
+	tok.maxInputChar = 350
+	ids, offsets, err := tok.Encode(word, nil, nil)
+	require.NoError(t, err)
+	require.Len(t, ids, 102)
+	assert.Equal(t, int64(500), ids[1])
+	assert.Equal(t, int64(501), ids[2])
+
+	for i := 1; i <= 100; i++ {
+		expectedStart := (i - 1) * 2
+		expectedEnd := i * 2
+		assert.Equal(t, types.Offset{Start: expectedStart, End: expectedEnd}, offsets[i], "token %d offset mismatch", i)
+		assert.True(t, utf8.RuneStart(word[offsets[i].Start]))
+	}
+}
+
+func TestWordPieceTokenizer_SlowPathMultiByteRuneLenChange(t *testing.T) {
+	tok := &wordPieceTokenizer{
+		vocab: map[string]int64{
+			"[UNK]": 100, "[CLS]": 101, "[SEP]": 102,
+			"i": 300, "##a": 301,
+		},
+		unkID:        100,
+		clsID:        101,
+		sepID:        102,
+		prefix:       "##",
+		maxInputChar: 512,
+	}
+	// 'İ' (U+0130) is 2 bytes in UTF-8, lowercases to 'i' (1 byte).
+	// Repeat 'a' 255 times so prefixLen + rawLen > 256 (triggers tokenizeWordSlow).
+	word := "İ" + strings.Repeat("a", 255)
+	text := "prefix " + word + " suffix"
+	ids, offsets, err := tok.Encode(text, nil, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, ids)
+	for _, off := range offsets {
+		assert.True(t, utf8.ValidString(text[off.Start:off.End]), "offset [%d:%d] must fall on valid UTF-8 rune boundaries", off.Start, off.End)
 	}
 }
 

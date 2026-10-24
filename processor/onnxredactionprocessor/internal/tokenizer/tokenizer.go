@@ -211,26 +211,27 @@ func (t *wordPieceTokenizer) tokenizeWord(text string, wordStart, wordEnd int, d
 
 	lowercasedLen := rawLen
 	hasRuneLenChange := false
-	var textOffsets [257]uint8
+	var textOffsets [257]uint16
 
 	if !isASCII {
 		srcRel := 0
 		dstRel := 0
 		for srcRel < rawLen {
-			textOffsets[dstRel] = uint8(srcRel)
-			if prefixLen+dstRel+utf8.UTFMax > len(buf) {
-				return t.tokenizeWordSlow(text, wordStart, wordEnd, dstIDs, dstOffsets)
-			}
 			r, sz := utf8.DecodeRuneInString(text[wordStart+srcRel : wordEnd])
 			rLow := unicode.ToLower(r)
-			encSz := utf8.EncodeRune(buf[prefixLen+dstRel:], rLow)
+			encSz := utf8.RuneLen(rLow)
+			if encSz <= 0 || prefixLen+dstRel+encSz > len(buf) {
+				return t.tokenizeWordSlow(text, wordStart, wordEnd, dstIDs, dstOffsets)
+			}
+			textOffsets[dstRel] = uint16(srcRel) //nolint:gosec // srcRel <= rawLen <= 256
+			utf8.EncodeRune(buf[prefixLen+dstRel:], rLow)
 			if encSz != sz {
 				hasRuneLenChange = true
 			}
 			srcRel += sz
 			dstRel += encSz
 		}
-		textOffsets[dstRel] = uint8(srcRel)
+		textOffsets[dstRel] = uint16(srcRel) //nolint:gosec // srcRel <= rawLen <= 256
 		lowercasedLen = dstRel
 	}
 
@@ -317,7 +318,23 @@ func (t *wordPieceTokenizer) tokenizeWord(text string, wordStart, wordEnd int, d
 }
 
 func (t *wordPieceTokenizer) tokenizeWordSlow(text string, wordStart, wordEnd int, dstIDs []int64, dstOffsets []types.Offset) ([]int64, []types.Offset) {
-	word := strings.ToLower(text[wordStart:wordEnd])
+	raw := text[wordStart:wordEnd]
+	lowerBuf := make([]byte, 0, len(raw)*2)
+	textOffsets := make([]int, 0, len(raw)*2+1)
+
+	for idx := 0; idx < len(raw); {
+		r, rLen := utf8.DecodeRuneInString(raw[idx:])
+		lr := unicode.ToLower(r)
+		var rBuf [utf8.UTFMax]byte
+		lLen := utf8.EncodeRune(rBuf[:], lr)
+		for b := 0; b < lLen; b++ {
+			lowerBuf = append(lowerBuf, rBuf[b])
+			textOffsets = append(textOffsets, idx)
+		}
+		idx += rLen
+	}
+	textOffsets = append(textOffsets, len(raw))
+	word := string(lowerBuf)
 	if len(word) > t.maxInputChar {
 		dstIDs = append(dstIDs, t.unkID)
 		dstOffsets = append(dstOffsets, types.Offset{Start: wordStart, End: wordEnd})
@@ -363,7 +380,10 @@ func (t *wordPieceTokenizer) tokenizeWordSlow(text string, wordStart, wordEnd in
 		}
 
 		dstIDs = append(dstIDs, curID)
-		dstOffsets = append(dstOffsets, types.Offset{Start: wordStart + subStart, End: wordStart + subEnd})
+		dstOffsets = append(dstOffsets, types.Offset{
+			Start: wordStart + textOffsets[subStart],
+			End:   wordStart + textOffsets[subEnd],
+		})
 		subStart = subEnd
 	}
 
