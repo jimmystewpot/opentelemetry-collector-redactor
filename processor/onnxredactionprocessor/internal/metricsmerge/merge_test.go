@@ -383,3 +383,58 @@ func TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds(t *testin
 	assert.True(t, merged.HasSum())
 	assert.Equal(t, 42.0, merged.Sum(), "Sum from second datapoint must be preserved when first datapoint has no Sum")
 }
+
+func TestResolveCollisions_ExponentialHistogram_ExtremeOffsetBounds(t *testing.T) {
+	ts := pcommon.Timestamp(1000)
+
+	// 1. Offset span exceeding maxExpHistogramBuckets (4096) must not expand buckets
+	m1 := pmetric.NewMetric()
+	eh1 := m1.SetEmptyExponentialHistogram()
+	dp1 := eh1.DataPoints().AppendEmpty()
+	dp1.Attributes().PutStr("k", "v")
+	dp1.SetTimestamp(ts)
+	dp1.SetScale(5)
+	dp1.SetCount(10)
+	dp1.Positive().SetOffset(0)
+	dp1.Positive().BucketCounts().FromRaw([]uint64{10})
+
+	dp2 := eh1.DataPoints().AppendEmpty()
+	dp2.Attributes().PutStr("k", "v")
+	dp2.SetTimestamp(ts)
+	dp2.SetScale(5)
+	dp2.SetCount(20)
+	dp2.Positive().SetOffset(5000)
+	dp2.Positive().BucketCounts().FromRaw([]uint64{20})
+
+	ResolveCollisions(m1)
+	require.Equal(t, 1, eh1.DataPoints().Len())
+	merged1 := eh1.DataPoints().At(0)
+	assert.Equal(t, uint64(30), merged1.Count())
+	require.Equal(t, 1, merged1.Positive().BucketCounts().Len(), "bucket span > maxExpHistogramBuckets must not allocate expanded slice")
+
+	// 2. Extreme int32 offsets (-1,000,000,000 vs +1,000,000,000) at scale 20 must not OOM or panic
+	m2 := pmetric.NewMetric()
+	eh2 := m2.SetEmptyExponentialHistogram()
+	dp3 := eh2.DataPoints().AppendEmpty()
+	dp3.Attributes().PutStr("k", "v")
+	dp3.SetTimestamp(ts)
+	dp3.SetScale(20)
+	dp3.SetCount(1)
+	dp3.Positive().SetOffset(-1_000_000_000)
+	dp3.Positive().BucketCounts().FromRaw([]uint64{1})
+
+	dp4 := eh2.DataPoints().AppendEmpty()
+	dp4.Attributes().PutStr("k", "v")
+	dp4.SetTimestamp(ts)
+	dp4.SetScale(20)
+	dp4.SetCount(1)
+	dp4.Positive().SetOffset(1_000_000_000)
+	dp4.Positive().BucketCounts().FromRaw([]uint64{1})
+
+	ResolveCollisions(m2)
+	require.Equal(t, 1, eh2.DataPoints().Len())
+	merged2 := eh2.DataPoints().At(0)
+	assert.Equal(t, uint64(2), merged2.Count())
+	assert.Equal(t, int32(-1_000_000_000), merged2.Positive().Offset())
+	assert.Equal(t, []uint64{1}, merged2.Positive().BucketCounts().AsRaw())
+}

@@ -293,7 +293,9 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 					}
 				}
 				target.SetZeroCount(target.ZeroCount() + dp.ZeroCount())
-				if target.Scale() == dp.Scale() {
+				if target.Scale() == dp.Scale() &&
+					canMergeExpBuckets(target.Positive(), dp.Positive()) &&
+					canMergeExpBuckets(target.Negative(), dp.Negative()) {
 					mergeExpBuckets(target.Positive(), dp.Positive())
 					mergeExpBuckets(target.Negative(), dp.Negative())
 				}
@@ -313,9 +315,34 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 	return stats
 }
 
+const maxExpHistogramBuckets = 4096
+
+func canMergeExpBuckets(dst, src pmetric.ExponentialHistogramDataPointBuckets) bool {
+	srcLen := src.BucketCounts().Len()
+	if srcLen == 0 {
+		return true
+	}
+	dstLen := dst.BucketCounts().Len()
+	if dstLen == 0 {
+		return srcLen <= maxExpHistogramBuckets
+	}
+
+	minOffset := int64(dst.Offset())
+	if srcOffset := int64(src.Offset()); srcOffset < minOffset {
+		minOffset = srcOffset
+	}
+	maxEnd := int64(dst.Offset()) + int64(dstLen)
+	if srcEnd := int64(src.Offset()) + int64(srcLen); srcEnd > maxEnd {
+		maxEnd = srcEnd
+	}
+
+	newLen := maxEnd - minOffset
+	return newLen > 0 && newLen <= maxExpHistogramBuckets
+}
+
 // mergeExpBuckets merges exponential histogram bucket counts from src into dst
 // when scales are identical, expanding the destination bucket range to [minOffset, maxEnd)
-// if bucket offsets or lengths differ.
+// if bucket offsets or lengths differ and the expanded range does not exceed maxExpHistogramBuckets.
 func mergeExpBuckets(dst, src pmetric.ExponentialHistogramDataPointBuckets) {
 	srcLen := src.BucketCounts().Len()
 	if srcLen == 0 {
@@ -323,6 +350,9 @@ func mergeExpBuckets(dst, src pmetric.ExponentialHistogramDataPointBuckets) {
 	}
 	dstLen := dst.BucketCounts().Len()
 	if dstLen == 0 {
+		if srcLen > maxExpHistogramBuckets {
+			return
+		}
 		dst.SetOffset(src.Offset())
 		dst.BucketCounts().FromRaw(append([]uint64(nil), src.BucketCounts().AsRaw()...))
 		return
@@ -335,24 +365,27 @@ func mergeExpBuckets(dst, src pmetric.ExponentialHistogramDataPointBuckets) {
 		minOffset = srcOffset
 	}
 
-	dstEnd := int(dstOffset) + dstLen
-	srcEnd := int(srcOffset) + srcLen
+	dstEnd := int64(dstOffset) + int64(dstLen)
+	srcEnd := int64(srcOffset) + int64(srcLen)
 	maxEnd := dstEnd
 	if srcEnd > maxEnd {
 		maxEnd = srcEnd
 	}
 
-	newLen := maxEnd - int(minOffset)
-	newCounts := make([]uint64, newLen)
+	newLen := maxEnd - int64(minOffset)
+	if newLen <= 0 || newLen > maxExpHistogramBuckets {
+		return
+	}
+	newCounts := make([]uint64, int(newLen))
 
 	dstRaw := dst.BucketCounts().AsRaw()
-	dstBase := int(dstOffset) - int(minOffset)
+	dstBase := int(int64(dstOffset) - int64(minOffset))
 	for i := 0; i < dstLen; i++ {
 		newCounts[dstBase+i] += dstRaw[i]
 	}
 
 	srcRaw := src.BucketCounts().AsRaw()
-	srcBase := int(srcOffset) - int(minOffset)
+	srcBase := int(int64(srcOffset) - int64(minOffset))
 	for i := 0; i < srcLen; i++ {
 		newCounts[srcBase+i] += srcRaw[i]
 	}
