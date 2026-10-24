@@ -45,6 +45,14 @@ func TestMutationTarget_Set(t *testing.T) {
 	tMetricDesc := MutationTarget{Kind: TargetMetricDescription, Metric: metric}
 	tMetricDesc.Set("mutated_metric_desc")
 	assert.Equal(t, "mutated_metric_desc", metric.Description())
+
+	// 5. TargetSpanStatusMessage
+	span2 := traces.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	span2.Status().SetMessage("initial_status_message")
+	tSpanStatus := MutationTarget{Kind: TargetSpanStatusMessage, Span: span2, Signal: "traces"}
+	tSpanStatus.Set("mutated_status_message")
+	assert.Equal(t, "mutated_status_message", span2.Status().Message())
+	assert.Equal(t, "traces", tSpanStatus.Signal)
 }
 
 func TestTable_DeduplicationAndMutation(t *testing.T) {

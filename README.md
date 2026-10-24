@@ -1,6 +1,6 @@
 # vector-onnx-redactor: In-Process OpenTelemetry ONNX PII Redactor
 
-[![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.27%2B-blue.svg)](https://golang.org)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-Collector%20v0.163.0-orange.svg)](https://opentelemetry.io)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX%20Runtime-v1.31.0-brightgreen.svg)](https://onnxruntime.ai)
 [![Licence](https://img.shields.io/badge/Licence-Apache%202.0-blue.svg)](LICENSE)
@@ -104,7 +104,7 @@ BenchmarkPipeline_FullInference-10         1,062  1,185,635 ns/op  10,787 B/op  
 
 ### Prerequisites
 
-* **Go:** Version 1.22 or higher.
+* **Go:** Version 1.27 or higher.
 * **ONNX Runtime:** Version 1.31.0 C API headers and shared libraries (`libonnxruntime.so` on Linux, `libonnxruntime.dylib` on macOS).
 * **OpenTelemetry Collector Builder (`ocb`):** Version 0.163.2 or higher.
 * **C Compiler:** `clang` (macOS) or `gcc` (Linux).
@@ -174,7 +174,7 @@ processors:
       path: /etc/otel/models/tiny_ner.onnx
       sha256: 7ef06dbfe51de3cd4cb08c2075a390b21ad261b28e7c7f9e36e6e66d2d7329a8
       tokenizer_path: /etc/otel/models/tokenizer.json
-      tokenizer_sha256: 094033eb54d75f1d08c3726a0f0a0ab42c92ccb0f22bd27f4e9ed2d1caccd2fa
+      tokenizer_sha256: 2afe60ae310a17a1807c43abe1b6867b8b2985ca44bced09a11da3c90d227884
       session:
         intra_op_threads: 2     # CPU execution threads inside operators
         concurrent_runs: 2      # Maximum parallel inference calls
@@ -266,7 +266,7 @@ The processor exports granular OpenTelemetry metrics on port `:8888`:
 | `redaction_padding_ratio` | Histogram | `1` | Ratio of valid non-padding tokens to total allocated tensor slots. |
 | `redaction_entities_total` | Counter | `{entities}` | Count of detected and redacted entities partitioned by `label`. |
 | `redaction_inspected_strings_total` | Counter | `{strings}` | Total candidate strings inspected partitioned by `signal`. |
-| `redaction_skipped_total` | Counter | `{strings}` | Attributes skipped prior to inference partitioned by `reason` (`filter`, `bytes_body`). |
+| `redaction_skipped_total` | Counter | `{strings}` | Attributes skipped prior to inference partitioned by `reason` (`filter`, `bytes_body`, `max_depth`). |
 | `redaction_errors_total` | Counter | `{errors}` | Runtime errors partitioned by `reason` (`timeout`, `semaphore_full`, `panic`, etc.). |
 | `redaction_scrubbed_total` | Counter | `{strings}` | Strings scrubbed in-place with `[REDACTED_UNINSPECTED]` partitioned by `signal` and `reason`. |
 | `redaction_dropped_total` | Counter | `{records}` | Records dropped under `on_error: drop` partitioned by `signal` and `reason`. |

@@ -103,7 +103,10 @@ func (d *Decoder) DecodeWindow(logits []float32, numClasses int, offsets []types
 			prob = float32(math.Exp(float64(row[bestClass]-maxLogit))) / sumExp
 		}
 
-		lbl := d.classToLabel[bestClass]
+		lbl := types.LabelNone
+		if bestClass >= 0 && bestClass < len(d.classToLabel) {
+			lbl = d.classToLabel[bestClass]
+		}
 		th := d.thresholdFor(lbl)
 
 		if lbl == types.LabelNone || prob < th {

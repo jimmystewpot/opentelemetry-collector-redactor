@@ -3,6 +3,8 @@ package onnxredactionprocessor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,9 +18,12 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/processor/processortest"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/arena"
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/detect"
+	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/tokenizer"
 	"github.com/jimmystewpot/vector-onnx-redactor/processor/onnxredactionprocessor/internal/types"
 )
 
@@ -429,6 +434,7 @@ func TestProcessor_TelemetryHelpers(t *testing.T) {
 	tel.RecordInflight(1)
 	tel.RecordInflight(-1)
 	tel.RecordQueueWait(5 * time.Millisecond)
+	assert.NoError(t, tel.Close())
 
 	// Nil receiver safe
 	var nilTel *telemetry
@@ -445,6 +451,7 @@ func TestProcessor_TelemetryHelpers(t *testing.T) {
 	nilTel.RecordMetricCollision("Sum", 1)
 	nilTel.RecordInflight(1)
 	nilTel.RecordQueueWait(time.Millisecond)
+	assert.NoError(t, nilTel.Close())
 }
 
 type errWarmupDetector struct {
@@ -475,4 +482,235 @@ func TestProcessor_NewProcessorErrorsAndWarmupFailure(t *testing.T) {
 	defer func() { _ = proc.Shutdown(context.Background()) }()
 	err = proc.Start(context.Background(), nil)
 	assert.ErrorContains(t, err, "warmup failed")
+}
+
+func TestProcessor_RealONNXEngineAndEntitiesConfig(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Model.Path = "testdata/tiny_ner.onnx"
+	cfg.Model.TokenizerPath = "testdata/tokenizer.json"
+	cfg.Inference.CoalesceWindow = 5 * time.Millisecond
+	cfg.Filtering.MinStringLength = 1
+	cfg.Filtering.ExcludeAttributes = nil
+	cfg.Entities = []string{"EMAIL"}
+
+	set := processortest.NewNopSettings(Type)
+	proc, err := newProcessor(cfg, &set.TelemetrySettings, nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = proc.Shutdown(context.Background()) }()
+
+	sink := new(consumertest.LogsSink)
+	proc.nextLogs = sink
+
+	ld := plog.NewLogs()
+	rec := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	rec.Body().SetStr("tokenbperson tokenbemail tokenbperson-tokenbemail")
+
+	err = proc.ConsumeLogs(context.Background(), ld)
+	require.NoError(t, err)
+
+	require.Len(t, sink.AllLogs(), 1)
+	outRec := sink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	assert.Equal(t, "tokenbperson [REDACTED_EMAIL] tokenbperson-[REDACTED_EMAIL]", outRec.Body().Str())
+}
+
+func TestProcessor_SpanStatusAndMetricExemplarsAndMultiTimestampGauge(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Inference.CoalesceWindow = 5 * time.Millisecond
+	cfg.Filtering.MinStringLength = 1
+	cfg.Filtering.ExcludeAttributes = nil
+
+	rules := map[string]types.Label{
+		"alice@example.com": types.LabelEmail,
+		"John Doe":          types.LabelPerson,
+	}
+	proc, err := newTestProcessor(cfg, &ruleDetector{rules: rules})
+	require.NoError(t, err)
+	defer func() { _ = proc.Shutdown(context.Background()) }()
+
+	// 1. Span Status Message
+	sinkTraces := new(consumertest.TracesSink)
+	proc.nextTraces = sinkTraces
+
+	td := ptrace.NewTraces()
+	span := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	span.SetName("op")
+	span.Status().SetMessage("error from alice@example.com")
+
+	err = proc.ConsumeTraces(context.Background(), td)
+	require.NoError(t, err)
+	require.Len(t, sinkTraces.AllTraces(), 1)
+	outSpan := sinkTraces.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+	assert.Equal(t, "error from [REDACTED_EMAIL]", outSpan.Status().Message())
+
+	// 2. Metric Exemplars & Multi-timestamp Gauge preservation
+	sinkMetrics := new(consumertest.MetricsSink)
+	proc.nextMetrics = sinkMetrics
+
+	md := pmetric.NewMetrics()
+	sm := md.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty()
+
+	// Sum with Exemplar
+	mSum := sm.Metrics().AppendEmpty()
+	mSum.SetName("http.requests")
+	dpSum := mSum.SetEmptySum().DataPoints().AppendEmpty()
+	ex := dpSum.Exemplars().AppendEmpty()
+	ex.FilteredAttributes().PutStr("user", "John Doe")
+
+	// Gauge with 2 datapoints at ts1 and ts2 having clean attributes (host: "srv1")
+	ts1 := pcommon.NewTimestampFromTime(time.Unix(1000, 0))
+	ts2 := pcommon.NewTimestampFromTime(time.Unix(2000, 0))
+	mGauge := sm.Metrics().AppendEmpty()
+	mGauge.SetName("cpu.load")
+	dp1 := mGauge.SetEmptyGauge().DataPoints().AppendEmpty()
+	dp1.SetTimestamp(ts1)
+	dp1.Attributes().PutStr("host", "srv1")
+	dp1.SetDoubleValue(10.5)
+
+	dp2 := mGauge.Gauge().DataPoints().AppendEmpty()
+	dp2.SetTimestamp(ts2)
+	dp2.Attributes().PutStr("host", "srv1")
+	dp2.SetDoubleValue(20.5)
+
+	err = proc.ConsumeMetrics(context.Background(), md)
+	require.NoError(t, err)
+
+	require.Len(t, sinkMetrics.AllMetrics(), 1)
+	outMetrics := sinkMetrics.AllMetrics()[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
+	require.Equal(t, 2, outMetrics.Len())
+
+	outEx := outMetrics.At(0).Sum().DataPoints().At(0).Exemplars().At(0)
+	userVal, ok := outEx.FilteredAttributes().Get("user")
+	require.True(t, ok)
+	assert.Equal(t, "[REDACTED_PERSON]", userVal.Str())
+
+	require.Equal(t, 2, outMetrics.At(1).Gauge().DataPoints().Len())
+}
+
+func TestProcessor_MaxNestingDepth(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Inference.CoalesceWindow = 5 * time.Millisecond
+	cfg.OnError = types.ErrorModeDrop
+
+	proc, err := newTestProcessor(cfg, &ruleDetector{})
+	require.NoError(t, err)
+	defer func() { _ = proc.Shutdown(context.Background()) }()
+
+	sink := new(consumertest.LogsSink)
+	proc.nextLogs = sink
+
+	ld := plog.NewLogs()
+	rec := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+
+	curr := rec.Body().SetEmptyMap()
+	for i := 0; i < 34; i++ {
+		curr = curr.PutEmptyMap(fmt.Sprintf("k%d", i))
+	}
+	curr.PutStr("secret_key", "secret")
+
+	err = proc.ConsumeLogs(context.Background(), ld)
+	require.NoError(t, err)
+
+	require.Len(t, sink.AllLogs(), 1)
+	outCurr := sink.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body().Map()
+	for i := 0; i < 34; i++ {
+		v, ok := outCurr.Get(fmt.Sprintf("k%d", i))
+		require.True(t, ok)
+		outCurr = v.Map()
+	}
+	leaf, ok := outCurr.Get("secret_key")
+	require.True(t, ok)
+	assert.Equal(t, types.RedactedUninspected, leaf.Str())
+
+	// Dry-run mode with on_error: drop must NOT scrub deeply nested values,
+	// but MUST still record redaction_skipped_total{reason="max_depth"}
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+
+	cfgDry := createDefaultConfig().(*Config)
+	cfgDry.Inference.CoalesceWindow = 5 * time.Millisecond
+	cfgDry.OnError = types.ErrorModeDrop
+	cfgDry.DryRun = true
+
+	setDry := processortest.NewNopSettings(Type)
+	setDry.MeterProvider = mp
+	procDry, err := newProcessor(cfgDry, &setDry.TelemetrySettings, &mockTokenizer{}, &ruleDetector{})
+	require.NoError(t, err)
+	defer func() { _ = procDry.Shutdown(context.Background()) }()
+
+	sinkDry := new(consumertest.LogsSink)
+	procDry.nextLogs = sinkDry
+
+	ldDry := plog.NewLogs()
+	recDry := ldDry.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	currDry := recDry.Body().SetEmptyMap()
+	for i := 0; i < 34; i++ {
+		currDry = currDry.PutEmptyMap(fmt.Sprintf("k%d", i))
+	}
+	currDry.PutStr("secret_key", "secret")
+
+	require.NoError(t, procDry.ConsumeLogs(context.Background(), ldDry))
+	require.Len(t, sinkDry.AllLogs(), 1)
+	outDry := sinkDry.AllLogs()[0].ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body().Map()
+	for i := 0; i < 34; i++ {
+		v, ok := outDry.Get(fmt.Sprintf("k%d", i))
+		require.True(t, ok)
+		outDry = v.Map()
+	}
+	leafDry, ok := outDry.Get("secret_key")
+	require.True(t, ok)
+	assert.Equal(t, "secret", leafDry.Str(), "dry_run must preserve deeply nested string")
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var skippedCount, scrubbedCount int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch m.Name {
+			case "redaction_skipped_total":
+				for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+					skippedCount += dp.Value
+				}
+			case "redaction_scrubbed_total":
+				for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+					scrubbedCount += dp.Value
+				}
+			}
+		}
+	}
+	assert.Equal(t, int64(1), skippedCount, "redaction_skipped_total must be recorded in dry_run")
+	assert.Equal(t, int64(0), scrubbedCount, "redaction_scrubbed_total must be 0 in dry_run")
+}
+
+type closeTrackingTokenizer struct {
+	tokenizer.Tokenizer
+	closed int
+}
+
+func (c *closeTrackingTokenizer) Close() error {
+	c.closed++
+	return nil
+}
+
+func TestProcessor_TokenizerCloseOnShutdownAndInitError(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Model.TokenizerPath = filepath.Clean("testdata/tokenizer.json")
+	cfg.Model.Path = "testdata/nonexistent_model.onnx"
+
+	baseTok, err := tokenizer.NewWordPieceTokenizer(cfg.Model.TokenizerPath, "")
+	require.NoError(t, err)
+	trackTok := &closeTrackingTokenizer{Tokenizer: baseTok}
+
+	set := processortest.NewNopSettings(Type)
+	// 1. When detector init fails, newProcessor must close tokenizer and telemetry
+	_, err = newProcessor(cfg, &set.TelemetrySettings, trackTok, nil)
+	require.Error(t, err)
+	assert.Equal(t, 1, trackTok.closed, "tokenizer must be closed when newProcessor fails during engine init")
+
+	// 2. When processor succeeds and Shutdown is called, tokenizer.Close() must be called
+	trackTok2 := &closeTrackingTokenizer{Tokenizer: baseTok}
+	proc, err := newProcessor(cfg, &set.TelemetrySettings, trackTok2, &ruleDetector{})
+	require.NoError(t, err)
+	require.NoError(t, proc.Shutdown(context.Background()))
+	assert.Equal(t, 1, trackTok2.closed, "tokenizer must be closed on processor Shutdown")
 }

@@ -2,8 +2,6 @@ package types
 
 import (
 	"strings"
-
-	"go.opentelemetry.io/collector/pdata/pcommon"
 )
 
 // Label represents a supported Named Entity Recognition (NER) category.
@@ -112,15 +110,6 @@ type BucketedBatch struct {
 	Windows   []TokenWindow
 }
 
-// SignalKind identifies the OpenTelemetry telemetry signal type.
-type SignalKind uint8
-
-const (
-	SignalLogs SignalKind = iota
-	SignalTraces
-	SignalMetrics
-)
-
 // ErrorMode controls failure policy handling (fail closed vs fail open).
 type ErrorMode string
 
@@ -128,25 +117,3 @@ const (
 	ErrorModeDrop   ErrorMode = "drop"
 	ErrorModeIgnore ErrorMode = "ignore"
 )
-
-// TargetKind classifies the source and role of a telemetry target string.
-type TargetKind uint8
-
-const (
-	TargetKindLogBody TargetKind = iota
-	TargetKindLogAttr
-	TargetKindSpanName
-	TargetKindSpanAttr
-	TargetKindSpanEventName
-	TargetKindSpanEventAttr
-	TargetKindMetricName
-	TargetKindMetricDescription
-	TargetKindMetricAttr
-)
-
-// MutationTarget represents an in-place telemetry target to mutate with redacted text.
-// Designed as a value struct (zero closures) to eliminate heap allocations on the hot path.
-type MutationTarget struct {
-	Value pcommon.Value
-	Kind  TargetKind
-}

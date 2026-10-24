@@ -3,6 +3,7 @@ package ort
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -175,4 +176,134 @@ func TestEngine_ConcurrentCancellationIsolation(t *testing.T) {
 		assert.NoError(t, err1, "concurrent run must NOT be affected by another run's cancellation")
 		assert.ErrorIs(t, err2, context.Canceled)
 	}
+}
+
+func TestEngine_ConcurrentCloseDuringInference(t *testing.T) {
+	dec := decode.NewDecoder(defaultBIO, nil, 0.85)
+	eng, err := NewEngine(filepath.Clean(slowModelPath), slowSHA, 1, 2, false, dec)
+	require.NoError(t, err)
+
+	pool := arena.NewPool(2, 8, 19)
+	a := pool.Acquire()
+	defer pool.Release(a)
+
+	w := types.TokenWindow{
+		ParentUniqueIdx: 0,
+		TokenIDs:        []int64{101, 200, 102},
+		Offsets:         []types.Offset{{Start: 0, End: 0}, {Start: 0, End: 4}, {Start: 4, End: 4}},
+	}
+	batch := types.BucketedBatch{MaxSeqLen: 3, Windows: []types.TokenWindow{w}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = eng.DetectBatch(ctx, batch, a)
+	}()
+
+	time.Sleep(2 * time.Millisecond)
+	require.NoError(t, eng.Close())
+	<-done
+
+	_, errAfter := eng.DetectBatch(context.Background(), batch, a)
+	require.ErrorContains(t, errAfter, "session is closed")
+}
+
+func TestEngine_ConcurrentNewEngineInit(t *testing.T) {
+	dec := decode.NewDecoder(defaultBIO, nil, 0.85)
+	const concurrent = 8
+	errCh := make(chan error, concurrent)
+	engines := make([]*Engine, concurrent)
+
+	var wg sync.WaitGroup
+	for i := 0; i < concurrent; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			eng, err := NewEngine(filepath.Clean(tinyModelPath), tinySHA, 1, 1, false, dec)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			engines[idx] = eng
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+	for _, eng := range engines {
+		if eng != nil {
+			_ = eng.Close()
+		}
+	}
+}
+
+func TestEngine_SpanScratchReuse(t *testing.T) {
+	dec := decode.NewDecoder(defaultBIO, nil, 0.85)
+	eng, err := NewEngine(filepath.Clean(tinyModelPath), tinySHA, 1, 1, false, dec)
+	require.NoError(t, err)
+	defer func() { _ = eng.Close() }()
+
+	pool := arena.NewPool(4, 16, 19)
+	a := pool.Acquire()
+	defer pool.Release(a)
+
+	w := types.TokenWindow{
+		ParentUniqueIdx: 0,
+		TokenIDs:        []int64{101, 200, 210, 102},
+		Offsets: []types.Offset{
+			{Start: 0, End: 0},
+			{Start: 0, End: 4},
+			{Start: 5, End: 8},
+			{Start: 8, End: 8},
+		},
+	}
+	batch := types.BucketedBatch{
+		MaxSeqLen: 4,
+		Windows:   []types.TokenWindow{w, w},
+	}
+
+	spans, err := eng.DetectBatch(context.Background(), batch, a)
+	require.NoError(t, err)
+	require.Len(t, spans, 2)
+	assert.NotEmpty(t, spans[0])
+	assert.NotEmpty(t, spans[1])
+	assert.NotEmpty(t, a.SpanScratch, "SpanScratch must be populated by DetectBatch")
+}
+
+func TestEngine_ZeroLengthLogitsSliceAndZeroMaxSeqLen(t *testing.T) {
+	dec := decode.NewDecoder(defaultBIO, nil, 0.85)
+	eng, err := NewEngine(filepath.Clean(tinyModelPath), tinySHA, 1, 1, false, dec)
+	require.NoError(t, err)
+	defer func() { _ = eng.Close() }()
+
+	pool := arena.NewPool(4, 16, 19)
+	a := pool.Acquire()
+	defer pool.Release(a)
+
+	// 1. MaxSeqLen == 0 must return nil, nil without panicking on &a.InputIDs[0]
+	emptySeqBatch := types.BucketedBatch{
+		MaxSeqLen: 0,
+		Windows:   []types.TokenWindow{{ParentUniqueIdx: 0}},
+	}
+	spans, err := eng.DetectBatch(context.Background(), emptySeqBatch, a)
+	require.NoError(t, err)
+	assert.Nil(t, spans)
+
+	// 2. Arena with len(a.Logits) == 0 but cap(a.Logits) > 0 must reslice and succeed
+	a.Logits = a.Logits[:0]
+	w := types.TokenWindow{
+		ParentUniqueIdx: 0,
+		TokenIDs:        []int64{101, 200, 102},
+		Offsets:         []types.Offset{{Start: 0, End: 0}, {Start: 0, End: 4}, {Start: 4, End: 4}},
+	}
+	validBatch := types.BucketedBatch{MaxSeqLen: 3, Windows: []types.TokenWindow{w}}
+	spans, err = eng.DetectBatch(context.Background(), validBatch, a)
+	require.NoError(t, err)
+	require.Len(t, spans, 1)
 }

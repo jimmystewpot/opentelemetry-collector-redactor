@@ -67,3 +67,39 @@ func TestPool_ZeroAllocsPerRun(t *testing.T) {
 	require.NotNil(t, dArena)
 	defaultPool.Release(dArena)
 }
+
+func TestPool_OversizedSliceCapReset(t *testing.T) {
+	pool := NewPool(4, 16, 19)
+	a := pool.Acquire()
+
+	// Dirty index 30 (simulating Sub-batch 1), then slice down to [:8] (simulating Sub-batch 2)
+	a.InputIDs[30] = 999
+	a.AttentionMask[30] = 1
+	a.Logits[30] = 42.0
+	a.InputIDs = a.InputIDs[:8]
+	a.AttentionMask = a.AttentionMask[:8]
+	a.Logits = a.Logits[:8*19]
+
+	// Grow TokenIDPool, OffsetPool, Windows, SpanScratch, and ScratchBytes past 4x baseline
+	a.TokenIDPool = make([]int64, 1000)
+	a.OffsetPool = make([]types.Offset, 1000)
+	a.Windows = make([]types.TokenWindow, 100)
+	a.SpanScratch = make([]types.EntitySpan, 500)
+	a.ScratchBytes = make([]byte, 131072)
+
+	pool.Release(a)
+
+	b := pool.Acquire()
+	defer pool.Release(b)
+
+	assert.Equal(t, 64, len(b.InputIDs), "InputIDs length must be restored to tensorElements")
+	assert.Equal(t, 64*19, len(b.Logits), "Logits length must be restored to logitsElements")
+	assert.Equal(t, int64(0), b.InputIDs[30], "InputIDs beyond final sub-batch slice must still be zeroed")
+	assert.Equal(t, int64(0), b.AttentionMask[30], "AttentionMask beyond final sub-batch slice must still be zeroed")
+	assert.Equal(t, float32(0), b.Logits[30], "Logits beyond final sub-batch slice must still be zeroed")
+	assert.LessOrEqual(t, cap(b.TokenIDPool), 256, "oversized TokenIDPool must be reallocated to baseline")
+	assert.LessOrEqual(t, cap(b.OffsetPool), 256, "oversized OffsetPool must be reallocated to baseline")
+	assert.LessOrEqual(t, cap(b.Windows), 16, "oversized Windows must be reallocated to baseline")
+	assert.LessOrEqual(t, cap(b.SpanScratch), 256, "oversized SpanScratch must be reallocated to baseline")
+	assert.LessOrEqual(t, cap(b.ScratchBytes), 65536, "oversized ScratchBytes must be reallocated to baseline")
+}

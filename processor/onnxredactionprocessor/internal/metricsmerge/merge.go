@@ -1,7 +1,9 @@
 package metricsmerge
 
 import (
+	"slices"
 	"sort"
+	"strconv"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
@@ -32,6 +34,8 @@ func ComputeCanonicalAttrHash(attrs pcommon.Map, keyScratch []string) (uint64, [
 
 	h := uint64(fnvOffset64)
 	for _, k := range keyScratch {
+		h ^= uint64(len(k))
+		h *= fnvPrime64
 		for i := 0; i < len(k); i++ {
 			h ^= uint64(k[i])
 			h *= fnvPrime64
@@ -40,10 +44,48 @@ func ComputeCanonicalAttrHash(attrs pcommon.Map, keyScratch []string) (uint64, [
 		h *= fnvPrime64
 
 		if v, ok := attrs.Get(k); ok {
-			s := v.AsString()
-			for i := 0; i < len(s); i++ {
-				h ^= uint64(s[i])
+			h ^= uint64(v.Type()) //nolint:gosec // ValueType is a small non-negative enum
+			h *= fnvPrime64
+			switch v.Type() {
+			case pcommon.ValueTypeStr:
+				s := v.Str()
+				h ^= uint64(len(s))
 				h *= fnvPrime64
+				for i := 0; i < len(s); i++ {
+					h ^= uint64(s[i])
+					h *= fnvPrime64
+				}
+			case pcommon.ValueTypeInt:
+				var numBuf [24]byte
+				b := strconv.AppendInt(numBuf[:0], v.Int(), 10)
+				h ^= uint64(len(b))
+				h *= fnvPrime64
+				for i := 0; i < len(b); i++ {
+					h ^= uint64(b[i])
+					h *= fnvPrime64
+				}
+			case pcommon.ValueTypeDouble:
+				var numBuf [32]byte
+				b := strconv.AppendFloat(numBuf[:0], v.Double(), 'g', -1, 64)
+				h ^= uint64(len(b))
+				h *= fnvPrime64
+				for i := 0; i < len(b); i++ {
+					h ^= uint64(b[i])
+					h *= fnvPrime64
+				}
+			case pcommon.ValueTypeBool:
+				if v.Bool() {
+					h ^= 1
+				}
+				h *= fnvPrime64
+			default:
+				s := v.AsString()
+				h ^= uint64(len(s))
+				h *= fnvPrime64
+				for i := 0; i < len(s); i++ {
+					h ^= uint64(s[i])
+					h *= fnvPrime64
+				}
 			}
 		}
 		h ^= ';'
@@ -163,6 +205,8 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 				target.SetCount(target.Count() + dp.Count())
 				if target.HasSum() && dp.HasSum() {
 					target.SetSum(target.Sum() + dp.Sum())
+				} else if !target.HasSum() && dp.HasSum() {
+					target.SetSum(dp.Sum())
 				}
 				if dp.HasMin() {
 					if !target.HasMin() || dp.Min() < target.Min() {
@@ -175,7 +219,8 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 					}
 				}
 
-				if target.BucketCounts().Len() == dp.BucketCounts().Len() {
+				if target.BucketCounts().Len() == dp.BucketCounts().Len() &&
+					slices.Equal(target.ExplicitBounds().AsRaw(), dp.ExplicitBounds().AsRaw()) {
 					for b := 0; b < target.BucketCounts().Len(); b++ {
 						target.BucketCounts().SetAt(b, target.BucketCounts().At(b)+dp.BucketCounts().At(b))
 					}
@@ -234,6 +279,8 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 				target.SetCount(target.Count() + dp.Count())
 				if target.HasSum() && dp.HasSum() {
 					target.SetSum(target.Sum() + dp.Sum())
+				} else if !target.HasSum() && dp.HasSum() {
+					target.SetSum(dp.Sum())
 				}
 				if dp.HasMin() {
 					if !target.HasMin() || dp.Min() < target.Min() {
@@ -244,6 +291,13 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 					if !target.HasMax() || dp.Max() > target.Max() {
 						target.SetMax(dp.Max())
 					}
+				}
+				target.SetZeroCount(target.ZeroCount() + dp.ZeroCount())
+				if target.Scale() == dp.Scale() &&
+					canMergeExpBuckets(target.Positive(), dp.Positive()) &&
+					canMergeExpBuckets(target.Negative(), dp.Negative()) {
+					mergeExpBuckets(target.Positive(), dp.Positive())
+					mergeExpBuckets(target.Negative(), dp.Negative())
 				}
 				stats.record(pmetric.MetricTypeExponentialHistogram)
 			} else {
@@ -259,4 +313,83 @@ func ResolveCollisions(m pmetric.Metric) CollisionStats {
 	}
 
 	return stats
+}
+
+const maxExpHistogramBuckets = 4096
+
+func canMergeExpBuckets(dst, src pmetric.ExponentialHistogramDataPointBuckets) bool {
+	srcLen := src.BucketCounts().Len()
+	if srcLen == 0 {
+		return true
+	}
+	dstLen := dst.BucketCounts().Len()
+	if dstLen == 0 {
+		return srcLen <= maxExpHistogramBuckets
+	}
+
+	minOffset := int64(dst.Offset())
+	if srcOffset := int64(src.Offset()); srcOffset < minOffset {
+		minOffset = srcOffset
+	}
+	maxEnd := int64(dst.Offset()) + int64(dstLen)
+	if srcEnd := int64(src.Offset()) + int64(srcLen); srcEnd > maxEnd {
+		maxEnd = srcEnd
+	}
+
+	newLen := maxEnd - minOffset
+	return newLen > 0 && newLen <= maxExpHistogramBuckets
+}
+
+// mergeExpBuckets merges exponential histogram bucket counts from src into dst
+// when scales are identical, expanding the destination bucket range to [minOffset, maxEnd)
+// if bucket offsets or lengths differ and the expanded range does not exceed maxExpHistogramBuckets.
+func mergeExpBuckets(dst, src pmetric.ExponentialHistogramDataPointBuckets) {
+	srcLen := src.BucketCounts().Len()
+	if srcLen == 0 {
+		return
+	}
+	dstLen := dst.BucketCounts().Len()
+	if dstLen == 0 {
+		if srcLen > maxExpHistogramBuckets {
+			return
+		}
+		dst.SetOffset(src.Offset())
+		dst.BucketCounts().FromRaw(append([]uint64(nil), src.BucketCounts().AsRaw()...))
+		return
+	}
+
+	dstOffset := dst.Offset()
+	srcOffset := src.Offset()
+	minOffset := dstOffset
+	if srcOffset < minOffset {
+		minOffset = srcOffset
+	}
+
+	dstEnd := int64(dstOffset) + int64(dstLen)
+	srcEnd := int64(srcOffset) + int64(srcLen)
+	maxEnd := dstEnd
+	if srcEnd > maxEnd {
+		maxEnd = srcEnd
+	}
+
+	newLen := maxEnd - int64(minOffset)
+	if newLen <= 0 || newLen > maxExpHistogramBuckets {
+		return
+	}
+	newCounts := make([]uint64, int(newLen))
+
+	dstRaw := dst.BucketCounts().AsRaw()
+	dstBase := int(int64(dstOffset) - int64(minOffset))
+	for i := 0; i < dstLen; i++ {
+		newCounts[dstBase+i] += dstRaw[i]
+	}
+
+	srcRaw := src.BucketCounts().AsRaw()
+	srcBase := int(int64(srcOffset) - int64(minOffset))
+	for i := 0; i < srcLen; i++ {
+		newCounts[srcBase+i] += srcRaw[i]
+	}
+
+	dst.SetOffset(minOffset)
+	dst.BucketCounts().FromRaw(newCounts)
 }

@@ -34,8 +34,10 @@ ORT_URL = https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERS
 CGO_CFLAGS ?= -I$(ORT_DIR)/include
 CGO_LDFLAGS ?= -L$(ORT_DIR)/lib -lonnxruntime -Wl,-rpath,$(ORT_DIR)/lib
 
+ifneq ($(ORT_DIR),$(CURDIR)/.ort)
 export CGO_CFLAGS
 export CGO_LDFLAGS
+endif
 
 .PHONY: all fmt lint test bench clean download-ort download-ort-linux-amd64 download-ort-linux-arm64 download-ort-darwin-arm64 download-ort-darwin-amd64 print-env validate-spelling
 

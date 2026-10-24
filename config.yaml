@@ -17,7 +17,7 @@ processors:
       path: /etc/otel/models/tiny_ner.onnx
       sha256: 7ef06dbfe51de3cd4cb08c2075a390b21ad261b28e7c7f9e36e6e66d2d7329a8
       tokenizer_path: /etc/otel/models/tokenizer.json
-      tokenizer_sha256: 094033eb54d75f1d08c3726a0f0a0ab42c92ccb0f22bd27f4e9ed2d1caccd2fa
+      tokenizer_sha256: 2afe60ae310a17a1807c43abe1b6867b8b2985ca44bced09a11da3c90d227884
       session:
         intra_op_threads: 2
         concurrent_runs: 2

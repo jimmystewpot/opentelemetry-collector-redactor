@@ -15,6 +15,7 @@ const (
 	TargetSpanEventName                       // Mutates ptrace.SpanEvent.SetName
 	TargetMetricName                          // Mutates pmetric.Metric.SetName
 	TargetMetricDescription                   // Mutates pmetric.Metric.SetDescription
+	TargetSpanStatusMessage                   // Mutates ptrace.Span.Status().SetMessage
 )
 
 // MutationTarget is a value-type descriptor that applies mutations in-place with zero closures.
@@ -25,6 +26,7 @@ type MutationTarget struct {
 	SpanEvent  ptrace.SpanEvent
 	Metric     pmetric.Metric
 	MetricName string
+	Signal     string
 }
 
 // Set mutates the underlying telemetry field in-place.
@@ -40,6 +42,8 @@ func (t *MutationTarget) Set(s string) {
 		t.Metric.SetName(s)
 	case TargetMetricDescription:
 		t.Metric.SetDescription(s)
+	case TargetSpanStatusMessage:
+		t.Span.Status().SetMessage(s)
 	}
 }
 

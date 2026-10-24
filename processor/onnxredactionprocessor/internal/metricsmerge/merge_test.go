@@ -170,6 +170,11 @@ func TestResolveCollisions_ExponentialHistogram(t *testing.T) {
 	dp1.SetSum(100.0)
 	dp1.SetMin(5.0)
 	dp1.SetMax(20.0)
+	dp1.SetZeroCount(2)
+	dp1.Positive().SetOffset(1)
+	dp1.Positive().BucketCounts().FromRaw([]uint64{3, 5})
+	dp1.Negative().SetOffset(0)
+	dp1.Negative().BucketCounts().FromRaw([]uint64{1})
 
 	dp2 := eh.DataPoints().AppendEmpty()
 	dp2.Attributes().PutStr("user", "[REDACTED_PERSON]")
@@ -178,6 +183,11 @@ func TestResolveCollisions_ExponentialHistogram(t *testing.T) {
 	dp2.SetSum(40.0)
 	dp2.SetMin(2.0)
 	dp2.SetMax(15.0)
+	dp2.SetZeroCount(1)
+	dp2.Positive().SetOffset(1)
+	dp2.Positive().BucketCounts().FromRaw([]uint64{2, 2})
+	dp2.Negative().SetOffset(0)
+	dp2.Negative().BucketCounts().FromRaw([]uint64{4})
 
 	stats := ResolveCollisions(m)
 	assert.Equal(t, 1, stats.CollisionsByType[pmetric.MetricTypeExponentialHistogram])
@@ -187,6 +197,83 @@ func TestResolveCollisions_ExponentialHistogram(t *testing.T) {
 	assert.Equal(t, 140.0, dpMerged.Sum())
 	assert.Equal(t, 2.0, dpMerged.Min())
 	assert.Equal(t, 20.0, dpMerged.Max())
+	assert.Equal(t, uint64(3), dpMerged.ZeroCount())
+	assert.Equal(t, []uint64{5, 7}, dpMerged.Positive().BucketCounts().AsRaw())
+	assert.Equal(t, []uint64{5}, dpMerged.Negative().BucketCounts().AsRaw())
+}
+
+func TestResolveCollisions_ExponentialHistogram_OffsetAndScale(t *testing.T) {
+	t.Run("offset expansion and empty buckets", func(t *testing.T) {
+		md := pmetric.NewMetrics()
+		m := md.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
+		m.SetName("exp.hist.offset")
+		eh := m.SetEmptyExponentialHistogram()
+
+		ts := pcommon.Timestamp(1000000000)
+
+		dp1 := eh.DataPoints().AppendEmpty()
+		dp1.Attributes().PutStr("k", "v")
+		dp1.SetTimestamp(ts)
+		dp1.Positive().SetOffset(2)
+		dp1.Positive().BucketCounts().FromRaw([]uint64{10, 20}) // indices 2, 3
+		// dp1 negative left empty
+
+		dp2 := eh.DataPoints().AppendEmpty()
+		dp2.Attributes().PutStr("k", "v")
+		dp2.SetTimestamp(ts)
+		dp2.Positive().SetOffset(0)
+		dp2.Positive().BucketCounts().FromRaw([]uint64{1, 2, 3}) // indices 0, 1, 2
+		dp2.Negative().SetOffset(-1)
+		dp2.Negative().BucketCounts().FromRaw([]uint64{42}) // index -1
+
+		stats := ResolveCollisions(m)
+		assert.Equal(t, 1, stats.CollisionsByType[pmetric.MetricTypeExponentialHistogram])
+		require.Equal(t, 1, eh.DataPoints().Len())
+		dpMerged := eh.DataPoints().At(0)
+
+		// Positive should have range [0, 4) -> indices 0, 1, 2, 3
+		assert.Equal(t, int32(0), dpMerged.Positive().Offset())
+		assert.Equal(t, []uint64{1, 2, 13, 20}, dpMerged.Positive().BucketCounts().AsRaw())
+
+		// Negative was empty in dp1, populated from dp2
+		assert.Equal(t, int32(-1), dpMerged.Negative().Offset())
+		assert.Equal(t, []uint64{42}, dpMerged.Negative().BucketCounts().AsRaw())
+	})
+
+	t.Run("scale mismatch preserves buckets and merges zero count", func(t *testing.T) {
+		md := pmetric.NewMetrics()
+		m := md.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
+		m.SetName("exp.hist.scale_mismatch")
+		eh := m.SetEmptyExponentialHistogram()
+
+		ts := pcommon.Timestamp(1000000000)
+
+		dp1 := eh.DataPoints().AppendEmpty()
+		dp1.Attributes().PutStr("k", "v")
+		dp1.SetTimestamp(ts)
+		dp1.SetScale(2)
+		dp1.SetZeroCount(5)
+		dp1.Positive().SetOffset(1)
+		dp1.Positive().BucketCounts().FromRaw([]uint64{10})
+
+		dp2 := eh.DataPoints().AppendEmpty()
+		dp2.Attributes().PutStr("k", "v")
+		dp2.SetTimestamp(ts)
+		dp2.SetScale(3) // different scale
+		dp2.SetZeroCount(7)
+		dp2.Positive().SetOffset(1)
+		dp2.Positive().BucketCounts().FromRaw([]uint64{20})
+
+		stats := ResolveCollisions(m)
+		assert.Equal(t, 1, stats.CollisionsByType[pmetric.MetricTypeExponentialHistogram])
+		require.Equal(t, 1, eh.DataPoints().Len())
+		dpMerged := eh.DataPoints().At(0)
+
+		assert.Equal(t, uint64(12), dpMerged.ZeroCount())
+		assert.Equal(t, int32(2), dpMerged.Scale())
+		// Buckets must not be merged due to scale mismatch
+		assert.Equal(t, []uint64{10}, dpMerged.Positive().BucketCounts().AsRaw())
+	})
 }
 
 func TestResolveCollisions_SumDoubleAndMixed(t *testing.T) {
@@ -246,4 +333,108 @@ func TestResolveCollisions_GaugeOlderTimestamp(t *testing.T) {
 	// Should keep first datapoint with ts1
 	assert.Equal(t, 100.0, gauge.DataPoints().At(0).DoubleValue())
 	assert.Equal(t, ts1, gauge.DataPoints().At(0).Timestamp())
+}
+
+func TestComputeCanonicalAttrHash_DelimiterCollisionAndHistogramBounds(t *testing.T) {
+	// 1. Delimiter collision resistance: {"a": "b;c=d"} vs {"a": "b", "c": "d"}
+	m1 := pcommon.NewMap()
+	m1.PutStr("a", "b;c=d")
+	m2 := pcommon.NewMap()
+	m2.PutStr("a", "b")
+	m2.PutStr("c", "d")
+
+	var scratch []string
+	h1, scratch := ComputeCanonicalAttrHash(m1, scratch)
+	h2, _ := ComputeCanonicalAttrHash(m2, scratch)
+	assert.NotEqual(t, h1, h2, "maps with embedded '=' and ';' delimiters must not collide")
+
+	// 2. Type collision resistance: {"a": "123"} vs {"a": 123}
+	mStr := pcommon.NewMap()
+	mStr.PutStr("a", "123")
+	mInt := pcommon.NewMap()
+	mInt.PutInt("a", 123)
+	hStr, scratch := ComputeCanonicalAttrHash(mStr, scratch)
+	hInt, _ := ComputeCanonicalAttrHash(mInt, scratch)
+	assert.NotEqual(t, hStr, hInt, "string attribute '123' and int attribute 123 must not collide")
+
+	// 3. Histogram with mismatched ExplicitBounds must not sum BucketCounts
+	metric := pmetric.NewMetric()
+	hist := metric.SetEmptyHistogram()
+	ts := pcommon.Timestamp(1000)
+
+	dp1 := hist.DataPoints().AppendEmpty()
+	dp1.Attributes().PutStr("k", "v")
+	dp1.SetTimestamp(ts)
+	dp1.ExplicitBounds().FromRaw([]float64{10, 100})
+	dp1.BucketCounts().FromRaw([]uint64{1, 2, 3})
+	// dp1 has no Sum set
+
+	dp2 := hist.DataPoints().AppendEmpty()
+	dp2.Attributes().PutStr("k", "v")
+	dp2.SetTimestamp(ts)
+	dp2.ExplicitBounds().FromRaw([]float64{50, 500}) // different bounds!
+	dp2.BucketCounts().FromRaw([]uint64{4, 5, 6})
+	dp2.SetSum(42.0)
+
+	ResolveCollisions(metric)
+	require.Equal(t, 1, hist.DataPoints().Len())
+	merged := hist.DataPoints().At(0)
+	assert.Equal(t, []uint64{1, 2, 3}, merged.BucketCounts().AsRaw(), "mismatched explicit bounds must not sum bucket counts")
+	assert.True(t, merged.HasSum())
+	assert.Equal(t, 42.0, merged.Sum(), "Sum from second datapoint must be preserved when first datapoint has no Sum")
+}
+
+func TestResolveCollisions_ExponentialHistogram_ExtremeOffsetBounds(t *testing.T) {
+	ts := pcommon.Timestamp(1000)
+
+	// 1. Offset span exceeding maxExpHistogramBuckets (4096) must not expand buckets
+	m1 := pmetric.NewMetric()
+	eh1 := m1.SetEmptyExponentialHistogram()
+	dp1 := eh1.DataPoints().AppendEmpty()
+	dp1.Attributes().PutStr("k", "v")
+	dp1.SetTimestamp(ts)
+	dp1.SetScale(5)
+	dp1.SetCount(10)
+	dp1.Positive().SetOffset(0)
+	dp1.Positive().BucketCounts().FromRaw([]uint64{10})
+
+	dp2 := eh1.DataPoints().AppendEmpty()
+	dp2.Attributes().PutStr("k", "v")
+	dp2.SetTimestamp(ts)
+	dp2.SetScale(5)
+	dp2.SetCount(20)
+	dp2.Positive().SetOffset(5000)
+	dp2.Positive().BucketCounts().FromRaw([]uint64{20})
+
+	ResolveCollisions(m1)
+	require.Equal(t, 1, eh1.DataPoints().Len())
+	merged1 := eh1.DataPoints().At(0)
+	assert.Equal(t, uint64(30), merged1.Count())
+	require.Equal(t, 1, merged1.Positive().BucketCounts().Len(), "bucket span > maxExpHistogramBuckets must not allocate expanded slice")
+
+	// 2. Extreme int32 offsets (-1,000,000,000 vs +1,000,000,000) at scale 20 must not OOM or panic
+	m2 := pmetric.NewMetric()
+	eh2 := m2.SetEmptyExponentialHistogram()
+	dp3 := eh2.DataPoints().AppendEmpty()
+	dp3.Attributes().PutStr("k", "v")
+	dp3.SetTimestamp(ts)
+	dp3.SetScale(20)
+	dp3.SetCount(1)
+	dp3.Positive().SetOffset(-1_000_000_000)
+	dp3.Positive().BucketCounts().FromRaw([]uint64{1})
+
+	dp4 := eh2.DataPoints().AppendEmpty()
+	dp4.Attributes().PutStr("k", "v")
+	dp4.SetTimestamp(ts)
+	dp4.SetScale(20)
+	dp4.SetCount(1)
+	dp4.Positive().SetOffset(1_000_000_000)
+	dp4.Positive().BucketCounts().FromRaw([]uint64{1})
+
+	ResolveCollisions(m2)
+	require.Equal(t, 1, eh2.DataPoints().Len())
+	merged2 := eh2.DataPoints().At(0)
+	assert.Equal(t, uint64(2), merged2.Count())
+	assert.Equal(t, int32(-1_000_000_000), merged2.Positive().Offset())
+	assert.Equal(t, []uint64{1}, merged2.Positive().BucketCounts().AsRaw())
 }

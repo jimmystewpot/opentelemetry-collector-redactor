@@ -6,12 +6,10 @@ Generate deterministic synthetic ONNX test fixtures for onnxredactionprocessor.
 - tokenizer.json: Bert-style WordPiece tokenizer fixture with standard special tokens
 """
 
+import argparse
 import json
 import os
 import hashlib
-import numpy as np
-import onnx
-from onnx import helper, TensorProto
 
 TESTDATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -28,6 +26,9 @@ LABELS = [
 ]
 
 def make_tiny_ner_model():
+    import numpy as np
+    import onnx
+    from onnx import helper, TensorProto
     # input_ids: [batch_size, seq_len] (int64)
     input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch_size", "seq_len"])
     # attention_mask: [batch_size, seq_len] (int64)
@@ -92,6 +93,9 @@ def make_tiny_ner_model():
     return model
 
 def make_slow_loop_model():
+    import numpy as np
+    import onnx
+    from onnx import helper, TensorProto
     # A model designed to take measurable time and allow cooperative cancellation
     # It contains a Loop node with 200,000 iterations of vector arithmetic
     input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch_size", "seq_len"])
@@ -186,9 +190,11 @@ def make_tokenizer_json():
     # Deterministic entity tokens for testing:
     # 200..208: B-*, 210..218: I-*
     for i, label in enumerate(LABELS[1:10]):
-        vocab[f"token_{label.lower()}"] = 200 + i
+        clean = label.lower().replace("-", "").replace("_", "")
+        vocab[f"token{clean}"] = 200 + i
     for i, label in enumerate(LABELS[10:19]):
-        vocab[f"token_{label.lower()}"] = 210 + i
+        clean = label.lower().replace("-", "").replace("_", "")
+        vocab[f"token{clean}"] = 210 + i
 
     # Common vocabulary words for testing redaction & tokenization
     common_words = [
@@ -201,6 +207,7 @@ def make_tokenizer_json():
         "http", "https", "get", "post", "path", "api", "v1", "v2",
         "card", "credit", "ssn", "iban", "phone",
         "##alice", "##bob", "##smith", "##doe", "##com", "##org", "##net",
+        "-", "_",
     ]
     next_id = 300
     for w in common_words:
@@ -250,17 +257,23 @@ def make_tokenizer_json():
     return tok
 
 def main():
+    parser = argparse.ArgumentParser(description="Generate deterministic synthetic ONNX test fixtures.")
+    parser.add_argument("--tokenizer-only", action="store_true", help="Only regenerate tokenizer.json and checksums.txt")
+    args = parser.parse_args()
+
     os.makedirs(TESTDATA_DIR, exist_ok=True)
 
-    tiny_ner = make_tiny_ner_model()
-    tiny_ner_path = os.path.join(TESTDATA_DIR, "tiny_ner.onnx")
-    onnx.save(tiny_ner, tiny_ner_path)
-    print(f"Generated {tiny_ner_path}")
+    if not args.tokenizer_only:
+        import onnx
+        tiny_ner = make_tiny_ner_model()
+        tiny_ner_path = os.path.join(TESTDATA_DIR, "tiny_ner.onnx")
+        onnx.save(tiny_ner, tiny_ner_path)
+        print(f"Generated {tiny_ner_path}")
 
-    slow_loop = make_slow_loop_model()
-    slow_loop_path = os.path.join(TESTDATA_DIR, "slow_loop.onnx")
-    onnx.save(slow_loop, slow_loop_path)
-    print(f"Generated {slow_loop_path}")
+        slow_loop = make_slow_loop_model()
+        slow_loop_path = os.path.join(TESTDATA_DIR, "slow_loop.onnx")
+        onnx.save(slow_loop, slow_loop_path)
+        print(f"Generated {slow_loop_path}")
 
     tok_data = make_tokenizer_json()
     tok_path = os.path.join(TESTDATA_DIR, "tokenizer.json")
