@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: processor/onnxredactionprocessor/go.mod
           cache: false
@@ -46,7 +46,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: processor/onnxredactionprocessor/go.mod
           cache-dependency-path: processor/onnxredactionprocessor/go.sum
@@ -78,7 +78,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: processor/onnxredactionprocessor/go.mod
           cache-dependency-path: processor/onnxredactionprocessor/go.sum
